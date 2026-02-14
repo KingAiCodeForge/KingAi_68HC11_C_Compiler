@@ -6,15 +6,29 @@ Usage:
     python hc11cc.py <input.c> [-o output.asm] [--target vy_v6|1227730|16197427|generic]
                                 [--org 0x8000] [--stack 0x00FF] [--verbose]
 
+Output format is auto-detected from file extension:
+    .asm / .s  → assembly text (default)
+    .s19       → Motorola S19 (burnable)
+    .bin       → raw binary
+    .lst       → assembly listing with addresses and hex bytes
+
 Examples:
-    python hc11cc.py main.c -o main.asm --target vy_v6
-    python hc11cc.py blink.c --target 1227730 --verbose
-    python hc11cc.py test.c                          # generic target, stdout output
+    python hc11cc.py main.c -o main.s19 --target vy_v6
+    python hc11cc.py blink.c -o blink.bin --target 1227730
+    python hc11cc.py blink.c -o blink.lst --verbose
+    python hc11cc.py test.c                          # generic target, asm to stdout
 """
 
 import argparse
 import sys
 import os
+
+# Fix stdout encoding on Windows (box-drawing chars in assembly comments)
+if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except AttributeError:
+        pass  # Python < 3.7
 
 # Allow running from project root or as module
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -23,15 +37,16 @@ from hc11_compiler import compile_source
 from hc11_compiler.lexer import Lexer, LexerError
 from hc11_compiler.parser import Parser, ParseError
 from hc11_compiler.codegen import CodeGenError, TARGET_PROFILES
+from hc11_compiler.assembler import AssemblerError
 
 
 def parse_int_arg(value: str) -> int:
-    """Parse an integer argument that may be hex (0x...) or decimal."""
+    """Parse an integer argument that may be hex (0x...), $ prefix, or decimal."""
     value = value.strip()
     if value.startswith("0x") or value.startswith("0X"):
         return int(value, 16)
     if value.startswith("$"):
-        return int(value[1:], 16)
+        return int(value[1:], 16)  # Motorola hex convention
     return int(value)
 
 
@@ -57,7 +72,10 @@ def main():
     parser.add_argument("--ast", action="store_true",
                         help="Dump AST and exit (debug)")
     parser.add_argument("--version", action="version",
-                        version="hc11cc 0.2.0 (KingAI)")
+                        version="hc11cc 0.3.0 (KingAI)")
+    parser.add_argument("--format", choices=["asm", "s19", "bin", "listing"],
+                        default=None,
+                        help="Output format (auto-detected from -o extension if not set)")
 
     args = parser.parse_args()
 
@@ -72,7 +90,7 @@ def main():
         print(f"Error reading {args.input}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Determine org and stack
+    # Determine org and stack from target profile, allow CLI overrides
     profile = TARGET_PROFILES.get(args.target, TARGET_PROFILES["generic"])
     org = parse_int_arg(args.org) if args.org else profile["org"]
     stack = parse_int_arg(args.stack) if args.stack else profile["stack"]
@@ -101,22 +119,52 @@ def main():
             _print_ast(ast)
             sys.exit(0)
 
+        # Determine output format from --format flag, file extension, or default to asm
+        if args.format:
+            out_format = args.format
+        elif args.output:
+            ext = os.path.splitext(args.output)[1].lower()
+            if ext == '.s19':
+                out_format = 's19'
+            elif ext == '.bin':
+                out_format = 'binary'
+            elif ext == '.lst':
+                out_format = 'listing'
+            else:
+                out_format = 'asm'
+        else:
+            out_format = 'asm'
+
         # Full compilation
-        asm_output = compile_source(source, org=org, stack=stack, target=args.target)
+        result = compile_source(source, org=org, stack=stack,
+                                target=args.target, output=out_format)
 
         # Write output
         if args.output:
-            with open(args.output, "w", encoding="utf-8") as f:
-                f.write(asm_output)
-                f.write("\n")
+            if out_format == 'binary':
+                with open(args.output, "wb") as f:
+                    f.write(result)
+            else:
+                with open(args.output, "w", encoding="utf-8") as f:
+                    f.write(result)
+                    if not result.endswith('\n'):
+                        f.write("\n")
             if args.verbose:
-                print(f"[hc11cc] Output: {args.output}", file=sys.stderr)
+                print(f"[hc11cc] Output: {args.output} ({out_format})", file=sys.stderr)
+                if out_format in ('binary', 's19'):
+                    size = len(result) if out_format == 'binary' else 0
+                    print(f"[hc11cc] Binary size: {size} bytes", file=sys.stderr)
         else:
-            print(asm_output)
+            if out_format == 'binary':
+                # Can't write raw bytes to stdout in text mode
+                sys.stdout.buffer.write(result)
+            else:
+                print(result)
 
         if args.verbose:
-            line_count = asm_output.count("\n") + 1
-            print(f"[hc11cc] Generated {line_count} lines of assembly", file=sys.stderr)
+            if out_format == 'asm':
+                line_count = result.count("\n") + 1
+                print(f"[hc11cc] Generated {line_count} lines of assembly", file=sys.stderr)
 
     except LexerError as e:
         print(f"Lexer error: {e}", file=sys.stderr)
@@ -126,6 +174,9 @@ def main():
         sys.exit(1)
     except CodeGenError as e:
         print(f"Code generation error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except AssemblerError as e:
+        print(f"Assembler error: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"Internal compiler error: {e}", file=sys.stderr)

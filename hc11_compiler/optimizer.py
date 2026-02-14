@@ -8,6 +8,14 @@ Rules are applied iteratively until no more matches are found.
 Each rule is a (pattern, replacement) where pattern is a list
 of lambda predicates on stripped instruction text, and replacement
 is a function that returns new lines (or empty list to delete).
+
+Porting notes (for other languages / architectures):
+  The peephole optimizer is target-independent in shape — it pattern-matches
+  adjacent assembly lines and removes proven-redundant ones. To port this to
+  another CPU (e.g. ARM Thumb, AVR, 6502), replace the HC11 mnemonic checks
+  (LDAA, PSHA, TSX, etc.) with your target's equivalents while keeping the
+  same sliding-window logic. The key invariant is: patterns must never cross
+  a label or branch target boundary.
 """
 
 from __future__ import annotations

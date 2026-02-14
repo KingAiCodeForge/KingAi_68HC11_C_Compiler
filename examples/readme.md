@@ -1,0 +1,1 @@
+some of these are templates and untested, and if something is wrong at the start of this whole project it affect all of them just like the asm_wip on my vy patchlist github.

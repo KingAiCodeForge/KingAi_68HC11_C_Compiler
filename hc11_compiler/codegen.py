@@ -24,6 +24,17 @@ Memory layout:
   - $2000-$7FFF: Always visible (calibration/shared code)
   - $8000-$FFFF: Bank-switched program ROM
   - $FFD6-$FFFF: Interrupt vector table
+
+Porting to another CPU:
+  To retarget this code generator for a different processor (e.g. AVR, ARM,
+  6502, or x86), you need to change:
+    1. TARGET_PROFILES — replace memory maps and register names
+    2. _emit_* helpers — change mnemonics (LDAA→LDA, STAA→STA, etc.)
+    3. _gen_function — change prologue/epilogue (TSX→frame pointer setup)
+    4. _gen_binary_op — map operations to your ALU instructions
+    5. _gen_call — change calling convention (stack vs registers)
+    6. _gen_pointer_deref — change addressing modes (indexed → indirect, etc.)
+  The AST walking logic (if/while/for/return) is target-independent.
 """
 
 from __future__ import annotations
@@ -125,26 +136,26 @@ class CodeGenerator:
         self.target = target
         self.profile = TARGET_PROFILES.get(target, TARGET_PROFILES["generic"])
 
-        # Output sections
-        self._header_lines: List[str] = []
-        self._data_lines: List[str] = []
-        self._bss_lines: List[str] = []
-        self._code_lines: List[str] = []
-        self._vector_lines: List[str] = []
+        # Output sections (accumulated during code generation, joined at the end)
+        self._header_lines: List[str] = []    # Assembly file header / ORG directive
+        self._data_lines: List[str] = []      # Global variable EQU directives
+        self._bss_lines: List[str] = []       # Uninitialized data section
+        self._code_lines: List[str] = []      # Generated instructions
+        self._vector_lines: List[str] = []    # Interrupt vector table FDB entries
 
-        # State
-        self._global_scope = Scope()
+        # Symbol / state tracking
+        self._global_scope = Scope()              # Top-level symbol scope
         self._current_scope: Scope = self._global_scope
-        self._label_counter = 0
-        self._local_offset = 0          # Current stack frame size
-        self._in_function: Optional[FuncDecl] = None
-        self._zp_alloc = 0x0040         # Next free zero-page address
-        self._ram_alloc = 0x0100        # Next free extended RAM address
-        self._scratch_addr = 0x003F     # Reserved direct-page scratch byte (never allocated to vars)
-        self._string_literals: Dict[str, str] = {}  # label -> string data
-        self._isr_vectors: Dict[str, str] = {}       # vector name -> function label
-        self._break_labels: List[str] = []
-        self._continue_labels: List[str] = []
+        self._label_counter = 0                   # Monotonic counter for unique labels
+        self._local_offset = 0                    # Current function's stack frame size in bytes
+        self._in_function: Optional[FuncDecl] = None  # Currently-generating function
+        self._zp_alloc = 0x0040                   # Next free zero-page address for globals
+        self._ram_alloc = 0x0100                  # Next free extended RAM address for globals
+        self._scratch_addr = 0x003F               # Reserved direct-page scratch byte (never allocated)
+        self._string_literals: Dict[str, str] = {}    # label -> string data for FCC emission
+        self._isr_vectors: Dict[str, str] = {}        # vector name -> function label for vector table
+        self._break_labels: List[str] = []            # Stack of break-target labels (loops)
+        self._continue_labels: List[str] = []         # Stack of continue-target labels (loops)
 
     # ── Label generation ──────────────────────
 
@@ -238,12 +249,12 @@ class CodeGenerator:
     def _generate_header(self):
         desc = self.profile.get("description", self.target)
         self._header_lines = [
-            f"; ════════════════════════════════════════════",
+            f"; ============================================",
             f"; KingAI 68HC11 C Compiler Output",
             f"; Target: {desc}",
-            f"; ════════════════════════════════════════════",
+            f"; ============================================",
             f"",
-            f"; ── Memory Configuration ──",
+            f"; -- Memory Configuration --",
             f"        ORG     {self._hex16(self.org)}",
             f"",
         ]
@@ -253,25 +264,25 @@ class CodeGenerator:
         sections.extend(self._header_lines)
 
         if self._data_lines:
-            sections.append("; ── Initialized Data ──")
+            sections.append("; -- Initialized Data --")
             sections.extend(self._data_lines)
             sections.append("")
 
         if self._bss_lines:
-            sections.append("; ── Uninitialized Data (BSS) ──")
+            sections.append("; -- Uninitialized Data (BSS) --")
             sections.extend(self._bss_lines)
             sections.append("")
 
-        sections.append("; ── Code ──")
+        sections.append("; -- Code --")
         sections.extend(self._code_lines)
 
         if self._vector_lines:
             sections.append("")
-            sections.append("; ── Interrupt Vectors ──")
+            sections.append("; -- Interrupt Vectors --")
             sections.extend(self._vector_lines)
 
         sections.append("")
-        sections.append("; ── End ──")
+        sections.append("; -- End --")
         return "\n".join(sections)
 
     # ── Global variable generation ────────────

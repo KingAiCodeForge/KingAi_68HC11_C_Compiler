@@ -1,5 +1,7 @@
 # Private research, AI logs, email drafts
 ignore/
+hc11_bench_incar_emulator/ignore/
+hc11_virtual_emulator/ignore/
 
 # Python
 __pycache__/
@@ -11,6 +13,23 @@ build/
 .venv/
 venv/
 *.egg
+
+# Test artifacts (not the test source code)
+.pytest_cache/
+.benchmarks/
+htmlcov/
+.coverage
+
+# Dev-only audit/count scripts (underscore-prefixed = not for release)
+tests/_*.py
+
+# Compiled binary output (test artifacts)
+*.bin
+*.s19
+
+# VY V6 spark cut test files (project-specific, not for release)
+test_sparkcut.asm
+tests/test_sparkcut.asm
 
 # IDE
 .vscode/

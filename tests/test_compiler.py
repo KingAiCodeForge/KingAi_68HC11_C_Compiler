@@ -52,7 +52,7 @@ class TestBasicCompilation:
         if os.path.isdir(examples_dir):
             for fname in os.listdir(examples_dir):
                 if fname.endswith(".c"):
-                    with open(os.path.join(examples_dir, fname)) as f:
+                    with open(os.path.join(examples_dir, fname), encoding='utf-8') as f:
                         src = f.read()
                     # Should not raise
                     _compile(src)
@@ -235,7 +235,7 @@ class TestControlFlow:
 
     def test_isr_uses_rti(self):
         asm = _compile("""
-        __attribute__((interrupt)) void my_isr() {
+        __interrupt void my_isr() {
             unsigned char x;
             x = 1;
         }

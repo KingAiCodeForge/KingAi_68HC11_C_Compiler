@@ -222,21 +222,82 @@ SINGLE_CHAR_OPS: Dict[str, TokenType] = {
 # ──────────────────────────────────────────────
 
 class Preprocessor:
-    """Resolve #define macros and strip #include / #pragma lines."""
+    """Resolve #define macros and strip #include / #pragma lines.
+
+    This is a minimal C preprocessor that handles:
+      - #define NAME VALUE  (simple text substitution, no function macros)
+      - #define NAME         (flag defines, set to "1")
+      - #include              (stripped — headers handled externally)
+      - #ifdef / #ifndef / #endif / #else / #if / #elif / #undef  (stripped)
+      - #pragma               (passed through for codegen inspection)
+    """
 
     def __init__(self, source: str):
         self.source = source
         self.defines: Dict[str, str] = {}
 
+    @staticmethod
+    def _strip_comments(source: str) -> str:
+        """Remove all C-style comments (/* ... */ and // ...) while preserving
+        line numbers (newlines inside block comments are kept)."""
+        result = []
+        i = 0
+        in_string = False
+        string_char = ''
+        while i < len(source):
+            c = source[i]
+            # Track string literals to avoid stripping inside them
+            if not in_string and c in ('"', "'"):
+                in_string = True
+                string_char = c
+                result.append(c)
+                i += 1
+            elif in_string:
+                result.append(c)
+                if c == '\\' and i + 1 < len(source):
+                    i += 1
+                    result.append(source[i])
+                elif c == string_char:
+                    in_string = False
+                i += 1
+            elif c == '/' and i + 1 < len(source) and source[i + 1] == '/':
+                # Line comment — skip to end of line
+                while i < len(source) and source[i] != '\n':
+                    i += 1
+            elif c == '/' and i + 1 < len(source) and source[i + 1] == '*':
+                # Block comment — replace with spaces, keep newlines
+                i += 2
+                while i < len(source) - 1:
+                    if source[i] == '*' and source[i + 1] == '/':
+                        i += 2
+                        result.append(' ')  # replace comment with space
+                        break
+                    if source[i] == '\n':
+                        result.append('\n')
+                    i += 1
+                else:
+                    i += 1  # unterminated comment — skip
+            else:
+                result.append(c)
+                i += 1
+        return ''.join(result)
+
     def process(self) -> str:
+        # Strip all comments first (standard C preprocessing order)
+        source = self._strip_comments(self.source)
         out_lines: List[str] = []
-        for line in self.source.splitlines():
+        for line in source.splitlines():
             stripped = line.strip()
 
             # #define NAME value
             m = re.match(r'#\s*define\s+(\w+)\s+(.*)', stripped)
             if m:
                 name, value = m.group(1), m.group(2).strip()
+                # Strip trailing block comments from define values
+                # e.g. "#define X 0x02  /* comment */" -> value = "0x02"
+                value = re.sub(r'/\*.*?\*/', '', value).strip()
+                # Strip trailing line comments
+                value = re.sub(r'//.*$', '', value).strip()
                 self.defines[name] = value
                 out_lines.append("")  # keep line numbering
                 continue
@@ -284,7 +345,16 @@ class LexerError(Exception):
 
 
 class Lexer:
-    """Tokenizes preprocessed C source into a list of Tokens."""
+    """Tokenizes preprocessed C source into a list of Tokens.
+
+    Handles:
+      - Integer literals: decimal, hex (0x), binary (0b), octal (leading 0)
+      - Character literals: 'A', '\n', etc.
+      - String literals: "hello\n"
+      - All C keywords in the KEYWORDS table
+      - Multi-character operators (longest-match first)
+      - Single-character operators and punctuation
+    """
 
     def __init__(self, source: str, preprocess: bool = True):
         if preprocess:

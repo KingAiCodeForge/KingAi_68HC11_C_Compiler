@@ -3,7 +3,7 @@
  * ═══════════════════════════════════════════════════════
  *
  * Register map for 68HC11F1/E9 variants used in Delco automotive ECUs.
- * Compatible with: 1227165, 1227730, 16197427, 09356445 (VY V6), and similar.
+ * Compatible with: 09356445 (VY V6), and similar.
  *
  * Reference: Motorola MC68HC11F1 Technical Data (MC68HC11F1/D)
  *

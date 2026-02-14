@@ -5,6 +5,9 @@
  * Uses the TIC3 input capture for 24X crank signal on VY V6.
  *
  * Compile: python hc11cc.py examples/isr_example.c -o isr.asm --target vy_v6
+ *
+ * Demonstrates: ISR with RTI, volatile I/O, zero-page variables.
+ * Full pipeline: C → ASM → binary → S19
  */
 
 #define TFLG1       0x1023
@@ -26,18 +29,20 @@ __zeropage unsigned char rpm_byte;
 unsigned int total_teeth;
 
 void init_timer() {
-    /* Enable IC3 interrupt (crank signal) */
-    asm("LDAA $1022");
-    asm("ORAA #$01");
-    asm("STAA $1022");
+    volatile unsigned char *tmsk1 = (volatile unsigned char *)0x1022;
+    volatile unsigned char *tflg1 = (volatile unsigned char *)0x1023;
+    unsigned char val;
+
+    /* Enable IC3 interrupt (crank signal) — set bit 0 */
+    val = *tmsk1;
+    *tmsk1 = val | 0x01;
 
     crank_count = 0;
     total_teeth = 0;
     rpm_byte = 0;
 
     /* Clear any pending IC3 flag */
-    asm("LDAA #$01");
-    asm("STAA $1023");
+    *tflg1 = 0x01;
 
     /* Enable interrupts globally */
     asm("CLI");
@@ -49,15 +54,16 @@ void init_timer() {
  * Computes crank period for RPM calculation.
  */
 __interrupt void tic3_isr() {
+    volatile unsigned char *tflg1 = (volatile unsigned char *)0x1023;
+    volatile unsigned char *tic3h = (volatile unsigned char *)0x1014;
+    volatile unsigned char *tic3l = (volatile unsigned char *)0x1015;
+
     /* Clear IC3 flag by writing 1 to bit 0 of TFLG1 */
-    asm("LDAA #$01");
-    asm("STAA $1023");
+    *tflg1 = 0x01;
 
     /* Read captured time */
-    asm("LDAA $1014");
-    asm("STAA crank_period_h");
-    asm("LDAA $1015");
-    asm("STAA crank_period_l");
+    crank_period_h = *tic3h;
+    crank_period_l = *tic3l;
 
     /* Increment tooth counter */
     crank_count++;

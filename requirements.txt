@@ -1,0 +1,7 @@
+# KingAI 68HC11 C Compiler — Python Dependencies
+# Install: pip install -r requirements.txt
+#
+# The compiler itself uses ONLY Python stdlib (no third-party packages).
+# pytest is needed only for running the test suite.
+
+pytest>=7.0

@@ -30,7 +30,26 @@ class ParseError(Exception):
 
 
 class Parser:
-    """Recursive descent parser producing an AST from tokens."""
+    """Recursive descent parser producing an AST from tokens.
+
+    Operator precedence (lowest to highest):
+      Assignment (=, +=, -=, ...)
+      Ternary (?:)
+      Logical OR (||)
+      Logical AND (&&)
+      Bitwise OR (|)
+      Bitwise XOR (^)
+      Bitwise AND (&)
+      Equality (==, !=)
+      Relational (<, >, <=, >=)
+      Shift (<<, >>)
+      Additive (+, -)
+      Multiplicative (*, /, %)
+      Cast ((type)expr)
+      Unary (-, ~, !, *, &, ++, --)
+      Postfix ([], (), ., ->, ++, --)
+      Primary (literals, identifiers, parenthesized)
+    """
 
     def __init__(self, tokens: List[Token], source: str = ""):
         self.tokens = tokens
