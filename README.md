@@ -1,5 +1,7 @@
 # KingAI 68HC11 C Compiler — v0.3.0-alpha
 
+Based off my python 68hc11 disassembly scripts. i already had a working python patcher but this is for the people who want to try something different with these platforms and pcms.
+
 A subset-C cross-compiler targeting the Motorola 68HC11, built for writing custom code patches for Delco automotive ECUs (Holden VN–VY V6, GM OBD1).
 
 **Status: alpha — compiles C to HC11 assembly, assembles to binary/S19, patches into ROMs.** The complete pipeline (C → ASM → binary → patched PROM) works end-to-end. Hardware validation on a real ECU is the remaining gate.

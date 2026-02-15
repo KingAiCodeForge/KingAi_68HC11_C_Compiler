@@ -1,5 +1,7 @@
 # HC11 Bench / In-Car Emulator
 
+Need the right pinout for the ECU I'm using first.
+
 **Status:** Planning — no code yet (Feb 15, 2026)
 
 Hardware-based testing of compiled HC11 code on real Delco PCM hardware.
@@ -89,9 +91,8 @@ we have high confidence the compiler output is correct.
 ## Cross-Reference Sources
 
 1. **ALDL_Simulator_Instructions_V1.14.pdf** — MrModule hardware ALDL sim
-2. **kingai_srs_commodore_bcm_tool** — Python ALDL tooling, Mode 4 definitions
-3. **PCMHacking.net downloads** — OSEFlashTool, VPW/ALDL sniffer tools
-4. **ignore/dev_research_plan_for_bench_emulator.md** — full development plan
+2. **PCMHacking.net downloads** — OSEFlashTool, VPW/ALDL sniffer tools
+3. **ignore/dev_research_plan_for_bench_emulator.md** — full development plan
 
 ## Directory Structure
 

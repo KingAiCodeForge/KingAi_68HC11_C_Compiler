@@ -106,4 +106,3 @@ with these, the source wins:
 | hc11_bench_incar_emulator/ | Tests same binaries on real hardware |
 | examples/ | Primary test corpus — every example should run in emulator |
 | TunerPro-XDF-BIN-Universal-Exporter/ | XDF parsing for bin→table display |
-| kingai_srs_commodore_bcm_tool/ | ALDL protocol constants + Mode 4 reference |
