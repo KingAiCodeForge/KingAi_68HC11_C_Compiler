@@ -1,7 +1,9 @@
 # Private research, AI logs, email drafts
 ignore/
 hc11_bench_incar_emulator/ignore/
+hc11_esp32_arduino_raspberri_code/ignore/
 hc11_virtual_emulator/ignore/
+nvram_wip_rt_emulator_plug_n_play/ignore/
 
 # Python
 __pycache__/

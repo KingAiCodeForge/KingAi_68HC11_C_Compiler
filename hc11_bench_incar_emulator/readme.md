@@ -1,8 +1,6 @@
 # HC11 Bench / In-Car Emulator
 
-Need the right pinout for the ECU I'm using first.
-
-**Status:** Planning — no code yet (Feb 15, 2026)
+**Status:** Planning — no code yet (Feb 2026). Need verified pinout for the target ECU first.
 
 Hardware-based testing of compiled HC11 code on real Delco PCM hardware.
 This is the "truth test" that validates the virtual emulator's results
@@ -32,8 +30,8 @@ A bench testing rig that:
 ## Target Hardware
 
 - **L36 N/A V6 VX and VY** — the only flash-based HC11 ECU in the Holden range
-- VS VT V6 use socketed MEMCAL PROMs — different workflow (burn EPROM)
-- L67 (supercharged) VS VT VY VX all use 128KB MEMCALs
+- VS/VT V6 use socketed MEMCAL PROMs — different workflow (burn EPROM)
+- L67 (supercharged) VS/VT/VY/VX all use 128KB MEMCALs
 - The $060A calibration is the VY V6 Enhanced OS binary
 
 ## ALDL Protocol
@@ -41,7 +39,7 @@ A bench testing rig that:
 - Baud: 8192 baud, 8N1
 - Crystal: 4.194304 MHz → 2.097152 MHz E-clock → BAUD=$04 → 8192 exact
 - Physical: OBD-II pin 9 (or ALDL connector pin M on older models)
-- Logic: Inverted TTL (need MAX232 or equivalent level shifter)
+- Logic: Inverted TTL (requires MAX232 or equivalent level shifter)
 
 ## Phases
 

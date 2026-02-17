@@ -8,8 +8,8 @@ instructions, and you inspect the results.
 
 ## What Works Right Now
 
-- **Full CPU core:** All 256 page-1 opcodes + page 2/3/4 (Y-indexed, CPD, etc.)
-- **All addressing modes:** INH, IMM8, IMM16, DIR, EXT, INDX, INDY, REL, BIT2/3
+- **Full CPU core:** All 256 page-1 opcodes + pages 2/3/4 (Y-indexed, CPD, etc.)
+- **All addressing modes:** INH, IMM8, IMM16, DIR, EXT, INDX, INDY, REL, BIT direct/branch
 - **Complete ALU:** 8-bit and 16-bit add/sub/and/or/xor/shift/rotate with correct
   HC11 flag semantics (H, N, Z, V, C)
 - **SCI peripheral:** TX output capture, RX injection (ALDL simulation)

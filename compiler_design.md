@@ -1,27 +1,30 @@
-# 68HC11 C Compiler for Delco PCMs - Design Specification
+# 68HC11 C Compiler for Delco PCMs — Design Specification
+
+> **Last updated:** February 2026
+> **Status:** Alpha — full C → ASM → binary pipeline working, 74/74 tests passing
 
 ## 1. Introduction
 
-This document outlines the design and architecture for a C compiler targeting the Motorola 68HC11 microcontroller, with a specific focus on its application within Delco automotive Powertrain Control Modules (PCMs). The compiler will prioritize generating efficient, low-level code suitable for the resource-constrained environment of these ECUs. It will provide features for direct hardware manipulation, including memory-mapped I/O, interrupt handling, and precise control over memory layout.
+This document describes the design and architecture of a subset-C cross-compiler targeting the Motorola 68HC11 microcontroller, built specifically for Delco automotive Powertrain Control Modules (PCMs). The compiler generates efficient, low-level code for the resource-constrained ECU environment, with features for direct hardware manipulation including memory-mapped I/O, interrupt handling, and precise control over memory layout.
 
 ## 2. Target Architecture: Motorola 68HC11
 
-The compiler will generate assembly code for the 68HC11 instruction set. Key architectural features to be supported are summarized in the table below.
+The compiler generates assembly code for the 68HC11 instruction set. Key architectural features:
 
 | Feature | Description |
 | :--- | :--- |
-| **CPU Registers** | The compiler will manage the 8-bit accumulators (A, B), 16-bit combined accumulator (D), 16-bit index registers (X, Y), stack pointer (SP), and program counter (PC). |
-| **Memory Model** | A single, flat 64KB address space will be assumed. The compiler will support placing data in the faster, zero-page RAM ($0000-$00FF) for performance optimization. |
-| **Instruction Set** | The compiler will leverage the full 68HC11 instruction set, including arithmetic, logical, bit-manipulation, and branching instructions. |
-| **Addressing Modes** | Support for direct, extended, and indexed addressing modes will be implemented to generate efficient code for data access. |
+| **CPU Registers** | 8-bit accumulators (A, B), 16-bit combined accumulator (D), 16-bit index registers (X, Y), stack pointer (SP), program counter (PC). |
+| **Memory Model** | Flat 64KB address space with support for 128KB bank-switched ROMs (VY V6). Zero-page RAM ($0000–$00FF) for fast 8-bit direct addressing. |
+| **Instruction Set** | Full 68HC11 instruction set — 146 mnemonics, 261 opcode entries across 4 pages (base + $18/$1A/$CD prebytes). |
+| **Addressing Modes** | Direct, extended, immediate, indexed (X and Y), relative, inherent, and bit-manipulation modes. |
 
 ## 3. Compiler Features
 
-The compiler will support a subset of the ANSI C standard, with extensions for embedded programming.
+The compiler supports a practical subset of ANSI C with embedded extensions.
 
 ### 3.1. Data Types
 
-The following fundamental data types will be supported:
+Supported fundamental data types:
 
 | Data Type | Size | Range |
 | :--- | :--- | :--- |
@@ -33,34 +36,39 @@ The following fundamental data types will be supported:
 
 ### 3.2. Memory Management
 
-- **Stack**: The compiler will allow the user to define the initial stack pointer location. All function calls will use the hardware stack for passing arguments and storing local variables.
-- **RAM Allocation**: The compiler will provide a mechanism to explicitly place variables in the zero-page for faster access, using a custom keyword or pragma (e.g., `__attribute__((zero_page))`).
+- **Stack**: User-configurable initial stack pointer location. All function calls use the hardware stack for arguments and local variables.
+- **RAM Allocation**: The `__zeropage` qualifier allocates variables in direct-page RAM ($00–$FF) for faster access using 8-bit direct addressing instead of 16-bit extended addressing.
 
 ### 3.3. Low-Level Programming Extensions
 
-- **Inline Assembly**: A GCC-style `asm()` statement will be supported to allow embedding raw 68HC11 assembly instructions directly within C code. This is essential for performance-critical sections and direct hardware control.
-- **Interrupt Service Routines (ISRs)**: A custom function attribute (e.g., `__attribute__((interrupt))`) will be used to declare interrupt handlers. The compiler will automatically generate the correct prologue and epilogue for ISRs, including saving and restoring registers and using the `RTI` (Return from Interrupt) instruction.
-- **Memory-Mapped I/O**: Volatile pointers will be used to access memory-mapped I/O registers, preventing the compiler from optimizing away necessary reads and writes.
+- **Inline Assembly**: GCC-style `asm("...")` statements embed raw HC11 instructions directly in C code. Essential for performance-critical sections and direct hardware control.
+- **Interrupt Service Routines (ISRs)**: `__attribute__((interrupt))` generates proper RTI epilogue with register save/restore.
+- **Memory-Mapped I/O**: Volatile pointers (`*(volatile unsigned char *)0x1030`) access hardware registers without compiler optimization interference.
 
 ## 4. Compiler Architecture
 
-The compiler will be designed with a traditional multi-pass architecture:
+The compiler uses a traditional multi-pass architecture, implemented entirely in Python:
 
-1.  **Frontend (Parser & Lexer)**: This stage will parse the C source code into an Abstract Syntax Tree (AST). We will use a standard tool like `flex` and `bison` to generate the lexer and parser.
-2.  **Semantic Analyzer**: This pass will traverse the AST to perform type checking and other semantic analysis, ensuring the code is well-formed.
-3.  **Intermediate Representation (IR) Generator**: The AST will be translated into a simpler, three-address code intermediate representation.
-4.  **Code Generator (Backend)**: The IR will be translated into 68HC11 assembly code. This is the most critical and complex part of the compiler, involving instruction selection, register allocation, and optimization.
-5.  **Assembler & Linker**: The generated assembly code will be processed by an external assembler (like `as11`) and linker to produce the final executable binary.
+1. **Lexer** (`lexer.py`, ~498 lines) — Tokenizes C source into a stream of typed tokens (keywords, identifiers, operators, literals).
+2. **Parser** (`parser.py`, ~656 lines) — Recursive-descent parser that builds an Abstract Syntax Tree (AST). No external tools (flex/bison) — hand-written for full control.
+3. **AST** (`ast_nodes.py`, ~267 lines) — Node definitions for all supported C constructs.
+4. **Code Generator** (`codegen.py`, ~1325 lines) — Translates AST directly to HC11 assembly. Handles instruction selection, register allocation (AccA for 8-bit, AccD for 16-bit), and addressing mode selection.
+5. **Peephole Optimizer** (`optimizer.py`, ~170 lines) — 13 post-codegen rules that clean up redundant instructions (TSX dedup, push/pop elimination, dead TSTA removal, `while(1)` optimization).
+6. **Built-in Assembler** (`assembler.py`, ~1037 lines) — Two-pass assembler handling 146 mnemonics and 261 opcode entries. Outputs raw binary, Motorola S19, and listing files. No external assembler required.
 
-## 5. Implementation Plan
+## 5. Implementation Status
 
-The development will proceed in the following phases:
+| Phase | Description | Status |
+|-------|-------------|--------|
+| Phase 1 — Core infrastructure | Lexer, parser, basic AST | **Complete** |
+| Phase 2 — Basic expressions | 8-bit and 16-bit arithmetic codegen | **Complete** |
+| Phase 3 — Control flow | `if/else`, `while`, `for`, `do-while`, `break`, `continue` | **Complete** |
+| Phase 4 — Functions & stack | JSR/RTS, argument passing, local variables | **Complete** |
+| Phase 5 — Pointers & I/O | Pointer dereference, address-of, volatile I/O | **Complete** |
+| Phase 6 — Embedded extensions | Inline assembly, ISR support, `__zeropage` | **Complete** |
+| Phase 7 — Built-in assembler | Two-pass assembler, S19 + binary output | **Complete** |
+| Phase 8 — ROM patcher (`hc11kit`) | Code injection, JSR hook install, checksum fix | **Complete** |
+| Phase 9 — Arrays & structs | Parser handles them; codegen in progress | **In progress** |
+| Phase 10 — Hardware validation | Test on real ECU with oscilloscope | **Pending** |
 
-1.  **Phase 1: Core Compiler Infrastructure**: Set up the basic project structure, build system, and implement the frontend (lexer and parser) to recognize a small subset of C.
-2.  **Phase 2: Code Generation for Basic Expressions**: Implement the backend to generate assembly for simple arithmetic and logical expressions.
-3.  **Phase 3: Control Flow**: Add support for `if`, `else`, `for`, and `while` statements.
-4.  **Phase 4: Functions and Stack Management**: Implement function calls, argument passing, and local variable allocation on the stack.
-5.  **Phase 5: Pointers and Memory Access**: Add support for pointers and memory-mapped I/O.
-6.  **Phase 6: Embedded Extensions**: Implement inline assembly and interrupt handling.
-
-This phased approach will allow for incremental development and testing, ensuring a solid foundation before moving to more complex features.
+74/74 tests passing. ~5,200 lines of compiler + toolkit code.

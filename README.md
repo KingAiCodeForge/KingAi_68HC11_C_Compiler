@@ -1,11 +1,11 @@
 # KingAI 68HC11 C Compiler — v0.3.0-alpha
 
-Based off my python 68hc11 disassembly scripts. i already had a working python patcher but this is for the people who want to try something different with these platforms and pcms.
+Built from the ground up alongside working Python 68HC11 disassembly and patching scripts. This is for anyone who wants to go beyond hex-editing and write real C code for these ECU platforms.
 
 A subset-C cross-compiler targeting the Motorola 68HC11, built for writing custom code patches for Delco automotive ECUs (Holden VN–VY V6, GM OBD1).
 
-**Status: alpha — compiles C to HC11 assembly, assembles to binary/S19, patches into ROMs.** The complete pipeline (C → ASM → binary → patched PROM) works end-to-end. Hardware validation on a real ECU is the remaining gate.
-
+**Status: alpha — compiles C to HC11 assembly, assembles to binary/S19, patches into ROMs.** The complete pipeline (C → ASM → binary → patched PROM) works end-to-end. Hardware validation on a real ECU is the remaining gate. still treat as WIP needs more testing with more inputs that matter. the whole ose in one .c no overflow following original trans , rewriting and reducing the code , remove parts that make it so it have to use the split 6400rpm main spark system, it would be better to have just one table not a high and low. if anyone has ideas on how this could be done, or know what reason its in two parts from factory. what could i remove to make this one of the end goals. for this specific ecu.
+ 
 ## What It Does Right Now
 
 The compiler handles a practical subset of C and generates real 68HC11 instructions:
@@ -87,7 +87,8 @@ Output (abbreviated):
 ```asm
 ; ============================================
 ; KingAI 68HC11 C Compiler Output
-; Target: VY V6 PCM (09356445) - HC11F1, 128KB bank-switched
+; Target: VY V6 PCM (09356445) - HC11F1(unconfirmed could be E or G or other series each have minor difference in the ram address.  have to assume its one of them E or F maybe. 
+Will add each code disasm below later.
 ; ============================================
 
 ; -- Memory Configuration --
@@ -166,7 +167,10 @@ People who:
 - Want to write custom ECU logic in C instead of hand-assembling HC11
 - Need the full pipeline: C source → compiled binary → patched ROM image
 - Know the risks of running custom code on an engine controller
-- want ida pro and other tools functional on python on window 10/11 pcs as a light all in one opensource repo that is free and fully opensource, no compiled pe or exe here, hopefully this idea get some people involved so i who lov coding and pcmhacking and knowledge sharing or learning. if you spot a error please do a PR or send me the fix. on facebook pcmhacking forum or through github PR and issues. any ideas or questions put in issues.
+- Want a lightweight, all-in-one, fully open-source toolkit on Windows 10/11 — no compiled binaries, no black boxes, pure Python
+
+If you spot an error, please submit a PR or open an issue. Questions and ideas are welcome in GitHub Issues or on the PCMHacking forum.
+
 This is not a "flash and go" tuning tool. It's a C compiler + assembler + ROM patcher for bare-metal ECU work. 
 
 ## Looking for Collaborators
@@ -206,7 +210,7 @@ Open an issue or PR — the codebase is small (~5,200 lines total) and readable.
 
 ## Companion Repository — VY V6 ASM Patches
 
-This compiler is built alongside a work in progress[kingaustraliagg-vy-l36-060a-enhanced-asm-patches](https://github.com/KingAiCodeForge/kingaustraliagg-vy-l36-060a-enhanced-asm-patches) — a collection of 50+ hand-written and opus 4.6 generated 68HC11 assembly patches for the Holden VY V6 Ecotec L36 ($060A Enhanced binary, Delco 92118883).
+This compiler is built alongside the work-in-progress [kingaustraliagg-vy-l36-060a-enhanced-asm-patches](https://github.com/KingAiCodeForge/kingaustraliagg-vy-l36-060a-enhanced-asm-patches) — a collection of 50+ hand-written and AI-assisted 68HC11 assembly patches for the Holden VY V6 Ecotec L36 ($060A Enhanced binary, Delco 92118883).
 
 That repository contains:
 - **Spark cut limiter** patches (Chr0m3 dwell method, The1's CPD method, progressive/rolling/two-stage variants) all work in progress.
@@ -216,9 +220,9 @@ That repository contains:
 - **Full binary disassemblies** split by bank
 - **XDF definitions** for VS, VT, VX, VY (V6 NA, V6 S/C, V8) — all with 68 DTC flags
 - **RAM validation research** ($0046 bit analysis, $01A0 scratch byte, runtime methodology)
-- some bytes of free ROM space** mapped at $0C468–$0FFBF
+- Free ROM space mapped at $0C468–$0FFBF
 
-All of that was done the old-school way: hand-written assembly, manually hex-patched into the binary with a hex editor with alot of time and manual effort in other tools open. Every patch is a `.asm` file that has to be assembled externally and byte-copied into the ROM image at the right offset.
+All of that was done the old-school way: hand-written assembly, manually hex-patched into the binary with a hex editor, with a lot of time and manual effort across multiple tools. Every patch is a `.asm` file that has to be assembled externally and byte-copied into the ROM image at the correct offset.
 
 **This compiler changes that workflow.** Once hardware-validated, the goal is to write those same patches in C instead of raw assembly — compile with `hc11cc`, assemble + inject with `hc11kit patch`, and skip the manual hex editing entirely. Same result, but maintainable, readable, and repeatable. The spark cut patch that took 38 hand-written versions could be a single C function: threshold check, fake period injection, done.
 
@@ -303,4 +307,4 @@ See `CONTRIBUTING.md`. The most useful contributions right now:
 2. **Bug reports** — C input + expected assembly vs actual assembly
 3. **Array/struct codegen** — the parser handles these, but codegen needs implementation
 4. **New target profiles** — if you know the memory map of a Delco PCM not listed above
-5. Note to self or forkers - Check the gitignore to understand how it ignores tests and ignore folders. theses are for plans and research and internal stuff not needed for public github.
+5. **Note:** Check `.gitignore` to understand how `tests/` and `ignore/` folders are excluded. These contain internal plans, research, and development notes not intended for the public repository.

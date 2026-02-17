@@ -1,0 +1,5 @@
+hc11_esp32_arduino_raspberri_code\ATtiny\Dualmode Switch
+is a basicly what its named after what it does. could be edited for bigger chips.
+similar to moates g6 when the map switcher is together and plugged in and a stacked bin.
+a good reference. i like the indicator light, very russian.
+unsure where this is from so i dont know who to credit.

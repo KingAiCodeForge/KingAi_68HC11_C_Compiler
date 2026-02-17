@@ -128,17 +128,28 @@
 #define TMSK1_IC3I  0x01       /* IC3 Interrupt Enable            */
 
 /* ── VY V6 PCM Specifics (09356445) ────────── */
-/* Bank switching: PORTC bit 3 controls A16 address line */
-#define VY_BANK_PORT    0x03   /* PORTC address                   */
-#define VY_BANK_BIT     0x08   /* Bit 3 mask                      */
-/* BCLR VY_BANK_PORT,#VY_BANK_BIT  = select Engine bank  */
-/* BSET VY_BANK_PORT,#VY_BANK_BIT  = select Trans bank   */
+/* Bank switching: PORTC bit 3 controls A16 address line
+ * VY_BANK_PORT is the direct-page offset of PORTC ($1003).
+ * Value 0x03 works because HC11 BSET/BCLR use direct-page
+ * addressing and the I/O registers start at $1000 (INIT=$10).
+ * Full address: $1003. Direct-page offset: $03. */
+#define VY_BANK_PORT    0x03   /* PORTC direct-page offset ($1003)*/
+#define VY_BANK_PORT_EXT 0x1003 /* PORTC full extended address     */
+#define VY_BANK_BIT     0x08   /* Bit 3 mask (A16 address line)   */
+/* BCLR VY_BANK_PORT,#VY_BANK_BIT  = select Bank 2 (engine code)  */
+/* BSET VY_BANK_PORT,#VY_BANK_BIT  = select Bank 3 (trans/diag)   */
 
-/* Known VY V6 RAM locations */
+/* Known VY V6 RAM locations (verified against XDF v2.09b defs) */
 #define VY_RPM          0x00A2  /* Engine RPM (x25 scaling, 8-bit) */
 #define VY_DWELL_CALC   0x017B  /* Dwell intermediate calculation  */
-#define VY_CRANK_PERIOD 0x194C  /* 24X Crank period (TIC3 ISR)    */
 #define VY_MODE_BYTE    0x0046  /* Mode byte (bits 3,6,7 free)    */
+
+/* WARNING: VY_CRANK_PERIOD was previously listed as 0x194C but that
+ * is a FILE OFFSET in bank 3 (0x18000+0x194C-0x8000), NOT a RAM address.
+ * The actual RAM address for the 24X crank period captured by the TIC3
+ * ISR needs verification on-hardware. Commenting out until confirmed.
+ * #define VY_CRANK_PERIOD 0x???  -- needs hardware verification */
+/* Ref: 3X_PERIOD_ANALYSIS_COMPLETE.md, VY_V6_Assembly_Modding docs */
 
 /* ── Common Delco PCM Models ──────────────── */
 /* 1227165: 1986-89 V8 TPI, 27C128 (16KB) at $C000-$FFFF */
