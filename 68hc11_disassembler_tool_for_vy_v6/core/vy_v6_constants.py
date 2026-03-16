@@ -20,28 +20,33 @@ Usage:
     from vy_v6_constants import BINARY_PATH, RAM_ADDRESSES, TIMING_CONSTANTS
 
 Author: Jason King (KingAustraliaGG)
-Last Updated: January 14, 2026
+Last Updated: February 25, 2026
 """
 
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, Tuple
+import os
 
 # ============================================================================
 # BINARY FILE PATHS
 # ============================================================================
 
-# Primary binary (auto-detect drive: R:, C:, or A:, or relative to this script)
-BINARY_PATH_R = Path(r"R:\VY_V6_Assembly_Modding\VX-VY_V6_$060A_Enhanced_v1.0a - Copy.bin")
-BINARY_PATH_C = Path(r"C:\Repos\VY_V6_Assembly_Modding\VX-VY_V6_$060A_Enhanced_v1.0a - Copy.bin")
-BINARY_PATH_A = Path(r"A:\repos\VY_V6_Assembly_Modding\VX-VY_V6_$060A_Enhanced_v1.0a - Copy.bin")
+# Primary binary (auto-detect: env var, relative to script, or CWD)
 _SCRIPT_DIR = Path(__file__).resolve().parent
-BINARY_PATH_REL = _SCRIPT_DIR.parent.parent / "VX-VY_V6_$060A_Enhanced_v1.0a - Copy.bin"
+_BIN_NAME = "VX-VY_V6_$060A_Enhanced_v1.0a - Copy.bin"
+
+_SEARCH_PATHS = [
+    Path(os.environ.get("VY_BIN_DIR", "")) / _BIN_NAME,
+    _SCRIPT_DIR.parent.parent / _BIN_NAME,
+    _SCRIPT_DIR.parent / _BIN_NAME,
+    Path.cwd() / _BIN_NAME,
+]
 
 # Try each location in order
 BINARY_PATH = next(
-    (p for p in [BINARY_PATH_R, BINARY_PATH_C, BINARY_PATH_A, BINARY_PATH_REL] if p.exists()),
-    BINARY_PATH_C  # fallback default
+    (p for p in _SEARCH_PATHS if p.exists()),
+    _SCRIPT_DIR.parent.parent / _BIN_NAME  # fallback default
 )
 
 # Stock binary for comparison
@@ -91,7 +96,7 @@ class MemoryRegion:
 
 MEMORY_MAP = {
     'internal_ram': MemoryRegion(0x0000, 0x00FF, "Internal RAM", "256 bytes zero-page RAM"),
-    'stack_vars': MemoryRegion(0x0100, 0x01FF, "Stack/Variables", "Stack and working variables"),
+    'stack_vars': MemoryRegion(0x0100, 0x03FF, "Stack/Variables", "Stack and extended RAM (HC11F 1KB total)"),
     'pseudo_vectors': MemoryRegion(0x2000, 0x202F, "Pseudo-Vectors", "Interrupt redirect jump table"),
     'calibration': MemoryRegion(0x4000, 0x7FFF, "Calibration", "Fuel/spark tables, scalars"),
     'program_code': MemoryRegion(0x8000, 0xFFD5, "Program Code", "Executable code"),
@@ -103,17 +108,37 @@ MEMORY_MAP = {
 # ============================================================================
 
 RAM_ADDRESSES = {
+    # Engine state/mode bytes (verified from BRSET/BRCLR patterns)
+    'ALDL_MODE': 0x0042,        # ALDL diagnostic mode byte
+    'MODE_FLAGS': 0x0046,       # Engine mode flags (run/crank/etc)
+    'MODE_FLAGS_2': 0x0047,     # Secondary mode flags
+    'ENGINE_STATUS': 0x0080,    # Engine status byte
+    'ENGINE_STATE': 0x009D,     # Engine state flags
+    'GEAR_STATE': 0x009E,       # Current gear state
+    
     # Engine parameters - VERIFIED (72+ reads in code)
-    'RPM': 0x00A2,              # Engine RPM (82 reads, 2 writes)
+    'RPM': 0x00A2,              # Engine RPM / 25 (8-bit, 82 reads, 2 writes)
     'RPM_HIGH': 0x00A3,         # RPM high byte (for rev limiter)
+    'RPM_16BIT_H': 0x00A4,      # Engine RPM 16-bit high
+    'RPM_16BIT_L': 0x00A5,      # Engine RPM 16-bit low
     
-    # Timing parameters - VERIFIED (TIC3 ISR disassembly 2026-01-31)
+    # Sensor readings
+    'COOLANT_TEMP': 0x0083,     # Coolant temperature (filtered)
+    'MAP_VALUE': 0x00B6,        # Manifold Absolute Pressure
+    'TPS_FILTERED': 0x00F3,     # Throttle Position (filtered)
+    
+    # Ignition / spark
+    'SPARK_ADVANCE': 0x0097,    # Current spark advance
+    'DWELL_TIME': 0x0098,       # Current dwell time
     'DWELL_INTERMEDIATE': 0x017B,  # Dwell intermediate calc (STD at file 0x101E1) - NOT crank period!
-    'CRANK_PERIOD_24X': 0x194C,    # 24X crank period (STD at $3618 in TIC3 ISR, bank2)
-    'DWELL_RAM': 0x0199,        # Dwell time RAM location (3 STD, 1 LDD)
+    'DWELL_RAM': 0x0199,        # Dwell working value (3xSTD, 1xLDD)
     
-    # Status/Mode bytes - CONFIRMED
-    'ENGINE_STATUS': 0x0080,    # Engine status flags (needs verification)
+    # Fuel
+    'INJ_PW_H': 0x00C4,        # Injector pulse width high byte
+    'INJ_PW_L': 0x00C5,        # Injector pulse width low byte
+    
+    # Crank / timing
+    'CRANK_PERIOD_24X': 0x194C, # 24X crank period (bank2 CCP/purge logic, NOT TIC3 ISR)
 }
 
 # ============================================================================
@@ -135,7 +160,7 @@ FILE_OFFSETS = {
     'DWELL_INTERMEDIATE_STD': 0x101E1,   # STD $017B (store dwell intermediate)
     'DWELL_INTERMEDIATE_LDD': 0x101C2,   # LDD $017B (load dwell intermediate)
     # Actual 24X crank period storage (TIC3 ISR, bank2 only)
-    'CRANK_PERIOD_24X_STD': 0x13618,     # STD $194C (store 24X crank period)
+    'CRANK_PERIOD_24X_STD': 0x13618,     # STD $194C (bank2 CPU $B618, CCP/purge logic — NOT in TIC3 ISR)
     
     # Dwell operations - VERIFIED
     'DWELL_STD_1': 0x1008B,     # STD $0199
@@ -184,13 +209,22 @@ class TimingConstants:
     DELTA_CYLAIR_DWELL_ADDR: int = 0x6776  # XDF: "If Delta Cylair > This - Then Max Dwell"
     DELTA_CYLAIR_DWELL_VY: int = 0x20      # 32 decimal = 125 MG/CYL (VY ACTUAL)
     
-    # OSE12P values (FOR REFERENCE ONLY - these are NOT VY values!)
-    OSE12P_MIN_DWELL: int = 0xA2   # 162 decimal - OSE12P ONLY, NOT VY!
-    OSE12P_MIN_BURN: int = 0x24    # 36 decimal - OSE12P ONLY, NOT VY!
+    # VY V6 stock dwell/burn (same as VT/VS — common IPCM-6 values)
+    MIN_DWELL_STOCK: int = 0xA2   # 162 decimal — VY @ $171AA, VT @ $14735
+    MIN_BURN_STOCK: int = 0x24    # 36 decimal — VY @ $19813, VT @ $1473B
+    # Stock timer budget: 162 + 36 = 198
+    # 3X ref period formula: (256*256*60/RPM/3)
+    # Overflow RPM: when period < budget → ~6500 RPM
     
-    # Chr0m3 7200 RPM optimized values (for OSE12P-style modification)
-    MIN_DWELL_7200: int = 0x9A    # 154 decimal (saves 8μs)
-    MIN_BURN_7200: int = 0x1C     # 28 decimal (saves 8μs)
+    # Chr0m3 7200 RPM optimized values (bench tested on VT IPCM-6)
+    MIN_DWELL_7200: int = 0x9A    # 154 decimal (saves 8 counts)
+    MIN_BURN_7200: int = 0x1C     # 28 decimal (saves 8 counts)
+    # Patched budget: 154 + 28 = 182 → safe to 7200 RPM
+    
+    # VT alt values for 7100 RPM target (Chr0m3 video)
+    VT_MIN_DWELL_7100: int = 0x94  # 148 decimal
+    VT_MIN_BURN_7100: int = 0x14   # 20 decimal
+    # Alt budget: 148 + 20 = 168 → safe to 7100+ RPM
     
     # RPM limits
     MAX_RPM_STOCK: int = 6375     # 0xFF × 25 = factory limit
@@ -202,10 +236,10 @@ TIMING = TimingConstants()
 
 # ============================================================================
 # VECTOR TABLE (VERIFIED - From binary mapper January 2026)
-# Note: 128KB binary uses Bank 1 addresses (0x1FFxx), CPU sees as 0xFFxx
+# Note: These file offsets point to the BANK 1 copy of the vector table
 # ============================================================================
 
-# File offsets in 128KB binary (Bank 1 = 0x10000-0x1FFFF)
+# File offsets in 128KB binary (Bank 1 = 0x00000-0x0FFFF, vectors at 0x0FFxx)
 VECTOR_TABLE_FILE = {
     # File Offset → (Jump Table Target, ISR Name, Actual ISR Code Address)
     0x1FFD6: (0x2003, "SCI", 0x29D3),
@@ -245,7 +279,7 @@ VECTOR_TABLE = {
     0xFFE6: (0x2000, "TOC2", "Dwell Start"),
     0xFFE8: (0x200C, "TOC1", "Output Compare 1"),
     0xFFEA: (0x200F, "TIC3", "24X Crank -> 0x35FF"),  # CRITICAL
-    0xFFEC: (0x2012, "TIC2", "24X Crank -> 0x358A"),
+    0xFFEC: (0x2012, "TIC2", "CAM Sensor -> 0x358A"),
     0xFFEE: (0x2015, "TIC1", "Input Capture 1"),
     0xFFF0: (0x2000, "RTI", "Real Time Interrupt"),
     0xFFF2: (0x2018, "IRQ", "Main Interrupt"),
@@ -279,34 +313,39 @@ JUMP_TABLE = {
 
 HC11_REGISTERS = {
     # Port A/G/F - HC11F specific layout
-    0x1000: "PORTA",    # Port A data
+    0x1000: "PORTA",    # Port A data (EST, fuel inj outputs)
     0x1001: "DDRA",     # Port A data direction (HC11F only)
     0x1002: "PORTG",    # Port G data — bank switching bit 6
     0x1003: "DDRG",     # Port G data direction
-    0x1004: "PORTB",    # Port B data
+    0x1004: "PORTB",    # Port B data (output only)
     0x1005: "PORTF",    # Port F data (HC11F only)
     0x1006: "PORTC",    # Port C data
     0x1007: "DDRC",     # Port C data direction
-    0x1008: "PORTD",    # Port D data
+    0x1008: "PORTD",    # Port D data (SCI/SPI pins)
     0x1009: "DDRD",     # Port D data direction
-    0x100A: "PORTE",    # Port E data (ADC inputs)
+    0x100A: "PORTE",    # Port E data (ADC: TPS,MAP,ECT,IAT)
     
-    # Timer system
+    # Timer force/mask (added Feb 2026 — from ultimate_binary_analyzer)
+    0x100B: "CFORC",    # Compare force register
+    0x100C: "OC1M",     # OC1 mask (which pins OC1 controls)
+    0x100D: "OC1D",     # OC1 data (values for OC1-controlled pins)
+    
+    # Timer system (16-bit regs, also accessible as HI/LO bytes)
     0x100E: "TCNT",     # Timer counter (16-bit)
     0x1010: "TIC1",     # Input capture 1
-    0x1012: "TIC2",     # Input capture 2
-    0x1014: "TIC3",     # Input capture 3 (24X crank)
+    0x1012: "TIC2",     # Input capture 2 (CAM sensor)
+    0x1014: "TIC3",     # Input capture 3 (24X crank) ***
     0x1016: "TOC1",     # Output compare 1
-    0x1018: "TOC2",     # Output compare 2 (dwell)
-    0x101A: "TOC3",     # Output compare 3 (EST)
+    0x1018: "TOC2",     # Output compare 2 (dwell start)
+    0x101A: "TOC3",     # Output compare 3 (EST fire)
     0x101C: "TOC4",     # Output compare 4
     0x101E: "TOC5",     # Output compare 5
-    0x1020: "TCTL1",    # Timer control 1
-    0x1021: "TCTL2",    # Timer control 2
-    0x1022: "TMSK1",    # Timer mask 1
-    0x1023: "TFLG1",    # Timer flag 1
-    0x1024: "TMSK2",    # Timer mask 2
-    0x1025: "TFLG2",    # Timer flag 2
+    0x1020: "TCTL1",    # Timer ctrl 1 (OC edge cfg: EST,dwell)
+    0x1021: "TCTL2",    # Timer ctrl 2 (IC edge cfg: crank,cam)
+    0x1022: "TMSK1",    # Timer interrupt mask 1
+    0x1023: "TFLG1",    # Timer interrupt flag 1
+    0x1024: "TMSK2",    # Timer interrupt mask 2
+    0x1025: "TFLG2",    # Timer interrupt flag 2
     
     # Pulse accumulator
     0x1026: "PACTL",    # Pulse accumulator control
@@ -318,23 +357,28 @@ HC11_REGISTERS = {
     0x102A: "SPDR",     # SPI data register
     
     # SCI (ALDL)
-    0x102B: "BAUD",     # Baud rate register
+    0x102B: "BAUD",     # Baud rate (ALDL comms)
     0x102C: "SCCR1",    # SCI control register 1
     0x102D: "SCCR2",    # SCI control register 2
     0x102E: "SCSR",     # SCI status register
-    0x102F: "SCDR",     # SCI data register
+    0x102F: "SCDR",     # SCI data register (ALDL data)
     
     # ADC
-    0x1030: "ADCTL",    # ADC control register
+    0x1030: "ADCTL",    # ADC control (start conversion)
     0x1031: "ADR1",     # ADC result 1
     0x1032: "ADR2",     # ADC result 2
     0x1033: "ADR3",     # ADC result 3
     0x1034: "ADR4",     # ADC result 4
     
-    # System
-    0x103C: "INIT",     # RAM/Register mapping
-    0x103D: "TEST1",    # Test register 1
-    0x103F: "CONFIG",   # Configuration register
+    # System control (added Feb 2026 — from ultimate_binary_analyzer)
+    0x1035: "BPROT",    # Block protect (EEPROM write protect)
+    0x1039: "OPTION",   # System config options
+    0x103A: "COPRST",   # COP watchdog reset
+    0x103B: "PPROG",    # EEPROM programming control
+    0x103C: "HPRIO",    # Highest priority I-bit + misc
+    0x103D: "INIT",     # RAM/IO mapping register
+    0x103E: "TEST1",    # Factory test (reserved)
+    0x103F: "CONFIG",   # System configuration register
 }
 
 # ============================================================================

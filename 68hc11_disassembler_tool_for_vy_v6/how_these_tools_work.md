@@ -55,7 +55,7 @@ The VY V6 uses a **128KB flash** binary (131,072 bytes) organised into 3 banks:
 | Bank 2 | `0x10000–0x17FFF` | 32 KB | `$8000–$FFFF` | Engine control code (paged) |
 | Bank 3 | `0x18000–0x1FFFF` | 32 KB | `$8000–$FFFF` | Trans/diagnostics code (paged) |
 
-Bank switching is done via PORTC bit 3. Banks 2 and 3 **share the same CPU
+Bank switching is done via PORTG ($1002). Banks 2 and 3 **share the same CPU
 address space** (`$8000–$FFFF`) — only one is visible at a time.
 
 Key memory regions within the HC11's address space:
@@ -63,8 +63,8 @@ Key memory regions within the HC11's address space:
 | CPU Address | What's There |
 |-------------|-------------|
 | `$0000–$00FF` | Internal RAM (zero page — fast 8-bit addressing) |
-| `$0100–$01FF` | Stack + extended RAM |
-| `$1000–$103F` | Memory-mapped I/O registers (PORTA, PORTB, timers, ADC, SCI, SPI) |
+| `$0100–$03FF` | Stack + extended RAM (HC11F has 1KB total) |
+| `$1000–$105F` | Memory-mapped I/O registers (96 bytes — HC11F extended) |
 | `$2000–$202F` | Pseudo-ISR vector jump table (JMP instructions) |
 | `$2030–$7FFF` | Calibration data (tables, constants — what XDF defines) |
 | `$8000–$FFFF` | Program ROM (executable code, banked) |
@@ -76,8 +76,8 @@ XDF addresses = **file offsets**, not CPU addresses. The XDF BASEOFFSET is 0 for
 standard VY V6 binaries. So `XDF address 0x77DE` = byte `0x77DE` in the `.bin`
 file = CPU address `$77DE` when bank 1 is active.
 
-For code in banks 2/3: `CPU_addr = file_offset - 0x10000` (bank 2) or
-`file_offset - 0x18000 + 0x8000` (bank 3).
+For code in banks 2/3: `CPU_addr = file_offset - 0x8000` (bank 2) or
+`file_offset - 0x10000` (bank 3).
 
 ---
 
@@ -175,7 +175,7 @@ constants, opcodes, and utilities.
 | **`address_conversion.py`** | 531 | Converts between XDF file offsets and HC11 CPU addresses. Handles BASEOFFSET (subtract flag), the 128KB 3-bank layout, and special regions ($1000–$103F registers). `AddressConverter` class with `file_to_cpu()`, `cpu_to_file()`, `is_ram()`, `is_io_register()`. |
 | **`cli_base.py`** | 246 | Standard CLI argument parser base class. Provides `--input`, `--output`, `--format`, `--verbose`, `--timestamp` flags shared by all tools. Consistent logging setup and error handling. |
 | **`output_manager.py`** | 316 | Centralised output formatting. Supports timestamped filenames, multiple formats (txt, JSON, CSV, markdown), organised directory structures. Tracks statistics (files written, bytes written). |
-| **`analyze_bank_switching.py`** | 558 | Maps HC11 expanded mode memory banking. Scans for PORTC writes that control bank select bit 3. Identifies which code runs in which bank, cross-bank calls, and bank switching sequences. |
+| **`analyze_bank_switching.py`** | 558 | Maps HC11 expanded mode memory banking. Scans for PORTG ($1002) writes that control bank select. Identifies which code runs in which bank, cross-bank calls, and bank switching sequences. |
 | **`analyze_interrupts_v2.py`** | 267ish | Interrupt vector table analysis. Reads the 14 hardware vectors at `$FFD6–$FFFF`, resolves to ISR entry points, traces through the pseudo-vector jump table at `$2000–$202F`, identifies ISR handler code. |
 | **`xdf_verified_analysis.py`** | 475 | Strict XDF+binary cross-reference — NO speculation, only verified data. Extracts confirmed addresses from XDF, validates them against actual binary byte patterns. Uses Chr0m3 Motorsport validated constants as ground truth. |
 | **`binary_differ.py`** | 253 | Same as top-level `binary_differ.py` (shared copy in core for import). |

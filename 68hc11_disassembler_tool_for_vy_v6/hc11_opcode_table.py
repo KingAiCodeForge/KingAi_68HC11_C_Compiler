@@ -52,6 +52,7 @@ HC11_OPCODES = {
     0xA0: ("SUBA",  2, 4, "IDX", 0x00),
     0xB0: ("SUBA",  3, 4, "EXT", 0x00),
     0x10: ("SBA",   1, 2, "INH", 0x00),  # A - B → A
+    0x11: ("CBA",   1, 2, "INH", 0x00),  # A - B (compare only, no store)
     
     # ----------------------------------------------------------------
     # Arithmetic Operations - B Register
@@ -360,24 +361,13 @@ HC11_OPCODES = {
     0x01: ("NOP",   1, 2, "INH", 0x00),  # No Operation
     0x3E: ("WAI",   1, 9, "INH", 0x00),  # Wait for Interrupt
     0x3F: ("SWI",   1, 14, "INH", 0x00), # Software Interrupt
-    0xCF: ("STOP",  1, 2, "INH", 0xCD), # STOP mode (prebyte 0xCD)
+    0xCF: ("STOP",  1, 2, "INH", 0x00), # STOP clocks (S bit in CCR must be 0)
     
     # ----------------------------------------------------------------
-    # Multiply (unsigned 8-bit × 8-bit → 16-bit)
+    # Multiply/Divide
     # ----------------------------------------------------------------
-    0x3D: ("MUL",   1, 10, "INH", 0x00),  # A × B → D (unsigned)
-    
-    # ----------------------------------------------------------------
-    # Page 2 Instructions (0x18 prebyte) - Y Index Register
-    # ----------------------------------------------------------------
-    # Note: These use same opcodes as X-indexed but with 0x18 prefix
-    # Example: 0x18 0x3A = ABY (B + Y → Y)
-    # Full page 2 table omitted for brevity - use 0x18 prebyte detection
-    
-    # ----------------------------------------------------------------
-    # Page 3 Instructions (0x1A prebyte) - Extended Y Operations
-    # ----------------------------------------------------------------
-    # Note: CPY, LDY, STY use 0x1A prebyte + standard opcodes
+    # (MUL already defined above at 0x3D in Multiply/Divide section)
+    # (IDIV at 0x02, FDIV at 0x03 already defined)
 }
 
 # ====================================================================
@@ -385,33 +375,108 @@ HC11_OPCODES = {
 # ====================================================================
 # When 0x18 is encountered, next byte uses this table
 HC11_PAGE2_OPCODES = {
-    0x3A: ("ABY",   2, 4, "INH", 0x18),  # B + Y → Y
+    # ── Inherent (Y register) ──
     0x08: ("INY",   2, 4, "INH", 0x18),  # Y + 1 → Y
     0x09: ("DEY",   2, 4, "INH", 0x18),  # Y - 1 → Y
     0x30: ("TSY",   2, 4, "INH", 0x18),  # SP + 1 → Y
     0x35: ("TYS",   2, 4, "INH", 0x18),  # Y - 1 → SP
-    # All Y-indexed addressing modes follow same pattern as X
-    # with 0x18 prebyte (add 1 cycle overhead)
+    0x38: ("PULY",  2, 6, "INH", 0x18),  # Pull Y from stack
+    0x3A: ("ABY",   2, 4, "INH", 0x18),  # B + Y → Y
+    0x3C: ("PSHY",  2, 5, "INH", 0x18),  # Push Y onto stack
+    0x8F: ("XGDY",  2, 4, "INH", 0x18),  # Exchange D ↔ Y
+    # ── Bit operations (Y-indexed) ──
+    0x1C: ("BSET",  4, 8, "IDY", 0x18),  # M | mask → M (Y-indexed)
+    0x1D: ("BCLR",  4, 8, "IDY", 0x18),  # M & ~mask → M
+    0x1E: ("BRSET", 5, 8, "IDY", 0x18),  # Branch if M & mask = mask
+    0x1F: ("BRCLR", 5, 8, "IDY", 0x18),  # Branch if M & mask = 0
+    # ── Memory operations (Y-indexed) ──
+    0x60: ("NEG",   3, 7, "IDY", 0x18),
+    0x63: ("COM",   3, 7, "IDY", 0x18),
+    0x64: ("LSR",   3, 7, "IDY", 0x18),
+    0x66: ("ROR",   3, 7, "IDY", 0x18),
+    0x67: ("ASR",   3, 7, "IDY", 0x18),
+    0x68: ("ASL",   3, 7, "IDY", 0x18),
+    0x69: ("ROL",   3, 7, "IDY", 0x18),
+    0x6A: ("DEC",   3, 7, "IDY", 0x18),
+    0x6C: ("INC",   3, 7, "IDY", 0x18),
+    0x6D: ("TST",   3, 7, "IDY", 0x18),
+    0x6E: ("JMP",   3, 4, "IDY", 0x18),
+    0x6F: ("CLR",   3, 7, "IDY", 0x18),
+    # ── A register (Y-indexed) ──
+    0xA0: ("SUBA",  3, 5, "IDY", 0x18),
+    0xA1: ("CMPA",  3, 5, "IDY", 0x18),
+    0xA2: ("SBCA",  3, 5, "IDY", 0x18),
+    0xA4: ("ANDA",  3, 5, "IDY", 0x18),
+    0xA5: ("BITA",  3, 5, "IDY", 0x18),
+    0xA6: ("LDAA",  3, 5, "IDY", 0x18),
+    0xA7: ("STAA",  3, 5, "IDY", 0x18),
+    0xA8: ("EORA",  3, 5, "IDY", 0x18),
+    0xA9: ("ADCA",  3, 5, "IDY", 0x18),
+    0xAA: ("ORAA",  3, 5, "IDY", 0x18),
+    0xAB: ("ADDA",  3, 5, "IDY", 0x18),
+    # ── D/S/X (Y-indexed) ──
+    0xA3: ("SUBD",  3, 7, "IDY", 0x18),
+    0xAC: ("CPX",   3, 7, "IDY", 0x18),
+    0xAD: ("JSR",   3, 7, "IDY", 0x18),
+    0xAE: ("LDS",   3, 6, "IDY", 0x18),
+    0xAF: ("STS",   3, 6, "IDY", 0x18),
+    # ── B register (Y-indexed) ──
+    0xE0: ("SUBB",  3, 5, "IDY", 0x18),
+    0xE1: ("CMPB",  3, 5, "IDY", 0x18),
+    0xE2: ("SBCB",  3, 5, "IDY", 0x18),
+    0xE4: ("ANDB",  3, 5, "IDY", 0x18),
+    0xE5: ("BITB",  3, 5, "IDY", 0x18),
+    0xE6: ("LDAB",  3, 5, "IDY", 0x18),
+    0xE7: ("STAB",  3, 5, "IDY", 0x18),
+    0xE8: ("EORB",  3, 5, "IDY", 0x18),
+    0xE9: ("ADCB",  3, 5, "IDY", 0x18),
+    0xEA: ("ORAB",  3, 5, "IDY", 0x18),
+    0xEB: ("ADDB",  3, 5, "IDY", 0x18),
+    # ── D register (Y-indexed) ──
+    0xE3: ("ADDD",  3, 7, "IDY", 0x18),
+    0xEC: ("LDD",   3, 6, "IDY", 0x18),
+    0xED: ("STD",   3, 6, "IDY", 0x18),
+    # ── LDY/STY/CPY (0x18 prefix, all modes) ──
+    0x8C: ("CPY",   4, 5, "IMM", 0x18),  # Y - M:M+1 (immediate)
+    0x9C: ("CPY",   3, 6, "DIR", 0x18),
+    0xAC: ("CPY",   3, 7, "IDY", 0x18),  # Note: also CPX IDY above
+    0xBC: ("CPY",   4, 7, "EXT", 0x18),
+    0xCE: ("LDY",   4, 4, "IMM", 0x18),
+    0xDE: ("LDY",   3, 5, "DIR", 0x18),
+    0xEE: ("LDY",   3, 6, "IDY", 0x18),
+    0xFE: ("LDY",   4, 6, "EXT", 0x18),
+    0xDF: ("STY",   3, 5, "DIR", 0x18),
+    0xEF: ("STY",   3, 6, "IDY", 0x18),
+    0xFF: ("STY",   4, 6, "EXT", 0x18),
 }
 
 # ====================================================================
 # CPY/LDY/STY OPCODES (Page 3: 0x1A or 0xCD Prefix)
 # ====================================================================
+# ====================================================================
+# CPD + Crossed operands (Page 3: 0x1A Prefix)
+# ====================================================================
+# 0x1A prefix is for CPD (all modes) + LDY/STY in IDX mode (X-indexed)
 HC11_PAGE3_OPCODES = {
-    # 0x1A prefix
-    0x8C: ("CPY",   4, 5, "IMM", 0x1A),  # Y - M:M+1
-    0x9C: ("CPY",   3, 6, "DIR", 0x1A),
-    0xAC: ("CPY",   3, 7, "IDX", 0x1A),
-    0xBC: ("CPY",   4, 7, "EXT", 0x1A),
-    0xCE: ("LDY",   4, 4, "IMM", 0x1A),  # M:M+1 → Y
-    0xDE: ("LDY",   3, 5, "DIR", 0x1A),
-    0xEE: ("LDY",   3, 6, "IDX", 0x1A),
-    0xFE: ("LDY",   4, 6, "EXT", 0x1A),
-    0xDF: ("STY",   3, 5, "DIR", 0x1A),  # Y → M:M+1
-    0xEF: ("STY",   3, 6, "IDX", 0x1A),
-    0xFF: ("STY",   4, 6, "EXT", 0x1A),
-    # Missing opcodes (Motorola HC11 Reference Manual)
-    0x8F: 1,  # XGDX
+    # CPD (Compare D, all addressing modes)
+    0x83: ("CPD",   4, 5, "IMM", 0x1A),  # D - M:M+1 (immediate)
+    0x93: ("CPD",   3, 6, "DIR", 0x1A),
+    0xA3: ("CPD",   3, 7, "IDX", 0x1A),
+    0xB3: ("CPD",   4, 7, "EXT", 0x1A),
+    # Crossed: LDY/STY/CPY via X register (0x1A prefix)
+    0xAC: ("CPY",   3, 7, "IDX", 0x1A),  # CPY offset,X
+    0xEE: ("LDY",   3, 6, "IDX", 0x1A),  # LDY offset,X
+    0xEF: ("STY",   3, 6, "IDX", 0x1A),  # STY offset,X
+}
+
+# ====================================================================
+# Page 4 (0xCD Prefix) — Cross-indexed Y operands
+# ====================================================================
+HC11_PAGE4_OPCODES = {
+    0xA3: ("CPD",   3, 7, "IDY", 0xCD),  # CPD offset,Y
+    0xAC: ("CPX",   3, 7, "IDY", 0xCD),  # CPX offset,Y
+    0xEE: ("LDX",   3, 6, "IDY", 0xCD),  # LDX offset,Y
+    0xEF: ("STX",   3, 6, "IDY", 0xCD),  # STX offset,Y
 }
 
 # ====================================================================
@@ -428,6 +493,8 @@ def get_opcode_info(opcode: int, prebyte: int = 0x00):
         return HC11_PAGE2_OPCODES[opcode]
     elif prebyte == 0x1A and opcode in HC11_PAGE3_OPCODES:
         return HC11_PAGE3_OPCODES[opcode]
+    elif prebyte == 0xCD and opcode in HC11_PAGE4_OPCODES:
+        return HC11_PAGE4_OPCODES[opcode]
     elif prebyte == 0x00 and opcode in HC11_OPCODES:
         return HC11_OPCODES[opcode]
     return None
@@ -439,15 +506,10 @@ def is_prebyte(opcode: int) -> bool:
 def get_all_opcodes_for_mnemonic(mnemonic: str) -> list:
     """Get all opcodes that implement a given mnemonic."""
     results = []
-    for opcode, (mnem, size, cycles, mode, prebyte) in HC11_OPCODES.items():
-        if mnem == mnemonic:
-            results.append((opcode, size, cycles, mode, prebyte))
-    for opcode, (mnem, size, cycles, mode, prebyte) in HC11_PAGE2_OPCODES.items():
-        if mnem == mnemonic:
-            results.append((opcode, size, cycles, mode, prebyte))
-    for opcode, (mnem, size, cycles, mode, prebyte) in HC11_PAGE3_OPCODES.items():
-        if mnem == mnemonic:
-            results.append((opcode, size, cycles, mode, prebyte))
+    for table in (HC11_OPCODES, HC11_PAGE2_OPCODES, HC11_PAGE3_OPCODES, HC11_PAGE4_OPCODES):
+        for opcode, entry in table.items():
+            if isinstance(entry, tuple) and len(entry) >= 1 and entry[0] == mnemonic:
+                results.append((opcode, entry[1], entry[2], entry[3], entry[4]))
     return results
 
 if __name__ == "__main__":

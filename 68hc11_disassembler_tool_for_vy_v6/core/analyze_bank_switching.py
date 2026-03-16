@@ -33,47 +33,57 @@ import struct
 
 @dataclass
 class HC11HardwareSpec:
-    """MC68HC11 hardware specifications - VERIFIED"""
-    cpu: str = "MC68HC11E9"
-    architecture: str = "8-bit Harvard"
+    """MC68HC11 hardware specifications - CORRECTED 2026-02-20
+    
+    Previous version claimed MC68HC11E9 with 256B RAM.
+    Binary evidence (LDS #$03FF) proves 1KB internal RAM → HC11F or similar variant.
+    Register block at $1000 (INIT register relocated, confirmed by 8x STAA $1023).
+    Port names corrected: $1002 = PORTG (not PORTC), $1003 = DDRG (not PORTD).
+    """
+    cpu: str = "MC68HC11F1 (or compatible — 1KB RAM variant)"
+    architecture: str = "8-bit Von Neumann (expanded multiplexed mode)"
     endianness: str = "Big-Endian"
     clock_speed: str = "2MHz E-clock (8MHz crystal / 4)"
     
     # Memory Configuration (Expanded Multiplexed Mode)
     internal_ram_start: int = 0x0000
-    internal_ram_end: int = 0x00FF  # 256 bytes
-    internal_registers_start: int = 0x1000  # Relocated by GM
-    internal_registers_end: int = 0x103F
+    internal_ram_end: int = 0x03FF  # 1024 bytes (proven by LDS #$03FF in binary)
+    internal_registers_start: int = 0x1000  # Relocated by INIT register
+    internal_registers_end: int = 0x105F    # HC11F has 96 bytes ($1000-$105F)
     
     # External Memory via Expansion
-    external_ram_start: int = 0x0100
-    external_ram_end: int = 0x01FF  # Used for stack/vars
+    # Stack uses internal RAM up to $03FF, not limited to $01FF
+    external_ram_start: int = 0x0400
+    external_ram_end: int = 0x0FFF  # External RAM (if present)
     
     # Flash Memory Chip
-    flash_chip: str = "M29W800DB (STMicro)"
-    flash_size: str = "1MB (8Mbit)"
-    flash_package: str = "TSOP48"
+    flash_chip: str = "Am29F010 or SST39SF010 (128KB)"
+    flash_size: str = "128KB (1Mbit)"
+    flash_package: str = "TSOP32/PLCC32"
     
-    # Key Register Addresses (Remapped by GM to $1000-$103F)
-    # Original $1000 block, but GM often remaps to $4000
-    porta: int = 0x0000  # Port A (IC/OC pins)
-    portb: int = 0x0004  # Port B (address high)
-    portc: int = 0x0003  # Port C (address/data mux)
-    portd: int = 0x0008  # Port D (SCI/SPI)
-    tcnt: int = 0x100E   # Timer Counter
-    tctl1: int = 0x1020  # Timer Control 1
-    tctl2: int = 0x1021  # Timer Control 2
-    tmsk1: int = 0x1022  # Timer Mask 1
-    tflg1: int = 0x1023  # Timer Flag 1
+    # Key Register Addresses (relocated to $1000 block via INIT register)
+    # Offsets are HC11F-specific — PORTG/DDRG replace PORTC/DDRC of HC11E
+    porta: int = 0x1000  # Port A (IC/OC timer pins PA0-PA7)
+    portg: int = 0x1002  # Port G (bank select I/O — 13 LDAA + 13 STAA in binary)
+    ddrg: int = 0x1003   # Data Direction Register G (1 STAB at file 0x1476A)
+    portb: int = 0x1004  # Port B (high address lines)
+    portd: int = 0x1008  # Port D (SCI/SPI)
+    tcnt: int = 0x100E   # Timer Counter (16-bit, free-running)
+    tctl1: int = 0x1020  # Timer Control 1 (output compare config)
+    tctl2: int = 0x1021  # Timer Control 2 (input capture config)
+    tmsk1: int = 0x1022  # Timer Mask 1 (interrupt enables)
+    tflg1: int = 0x1023  # Timer Flag 1 (8x STAA $1023 in binary confirms location)
     
-    # Vector Table (CONFIRMED)
-    reset_vector: int = 0xFFFE
-    irq_vector: int = 0xFFF8
-    xirq_vector: int = 0xFFF4
-    swi_vector: int = 0xFFF6
-    tic1_vector: int = 0xFFEE
-    tic2_vector: int = 0xFFEC
-    tic3_vector: int = 0xFFEA  # 24X Crank sensor
+    # Vector Table (CONFIRMED from binary — all 21 vectors verified)
+    reset_vector: int = 0xFFFE   # → $202A (LOW) / $C011 (HIGH)
+    cop_vector: int = 0xFFFA     # → $2024 (LOW) / $C015 (HIGH)
+    cmf_vector: int = 0xFFFC     # → $2027 (LOW) / $C019 (HIGH)
+    irq_vector: int = 0xFFF2     # → $2018 → JMP $30BA (both halves same)
+    xirq_vector: int = 0xFFF4    # → $201B → JMP $2BAC (both halves same)
+    swi_vector: int = 0xFFF6     # → $201E → JMP $2BA0 (both halves same)
+    tic1_vector: int = 0xFFEE    # → $2015 → JMP $301F (both halves same)
+    tic2_vector: int = 0xFFEC    # → $2012 → JMP $358A (both halves same)
+    tic3_vector: int = 0xFFEA    # → $200F → JMP $35FF — 24X crank sensor
 
 # ============================================================================
 # CONFIRMED MEMORY MAP FROM XDF ANALYSIS
@@ -521,32 +531,36 @@ class BankSwitchingAnalyzer:
 
 
 def main():
-    # Default binary path - adjust as needed
-    default_binary = Path(r"R:\VY_V6_Assembly_Modding\VX-VY_V6_$060A_Enhanced_v1.0a - Copy.bin")
+    # Default binary path - searches relative to project, env var, then CWD
+    _script_dir = Path(__file__).resolve().parent
+    _project_root = _script_dir.parent.parent
+    _bin_name = "VX-VY_V6_$060A_Enhanced_v1.0a - Copy.bin"
     
-    # Alternative paths to try
-    alternatives = [
-        Path(r"C:\Repos\VY_V6_Assembly_Modding\VX-VY_V6_$060A_Enhanced_v1.0a - Copy.bin"),
-        Path(r"R:\VY_V6_Assembly_Modding\bins\VX-VY_V6_$060A_Enhanced_v1.0a.bin"),
+    search_paths = [
+        _project_root / _bin_name,
+        _project_root / "bins" / _bin_name.replace(" - Copy", ""),
+        Path.cwd() / _bin_name,
     ]
+    
+    # Add env var path if set
+    env_dir = os.environ.get("VY_BIN_DIR")
+    if env_dir:
+        search_paths.insert(0, Path(env_dir) / _bin_name)
     
     # Find a valid binary
     binary_path = None
-    if default_binary.exists():
-        binary_path = default_binary
-    else:
-        for alt in alternatives:
-            if alt.exists():
-                binary_path = alt
-                break
+    for alt in search_paths:
+        if alt.exists():
+            binary_path = alt
+            break
     
     if binary_path is None:
         print("❌ Could not find VY V6 binary file!")
         print("   Searched:")
-        print(f"   - {default_binary}")
-        for alt in alternatives:
+        for alt in search_paths:
             print(f"   - {alt}")
         print("\n   Specify path as argument: python analyze_bank_switching.py <path>")
+        print("   Or set VY_BIN_DIR environment variable")
         sys.exit(1)
     
     analyzer = BankSwitchingAnalyzer(binary_path)

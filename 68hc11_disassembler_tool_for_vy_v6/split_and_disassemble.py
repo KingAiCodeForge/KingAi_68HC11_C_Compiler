@@ -2,6 +2,14 @@
 """
 VY V6 128KB Binary Splitter, Disassembler & Differ
 ===================================================
+*** NOTE: This script is now called by godlike_disassemble_all.py which adds
+*** GNU + udis backends and auto-applies XDF labeling to ALL outputs.
+*** Use:  python godlike_disassemble_all.py --target enhanced_v1.0a
+***
+*** This script remains functional standalone for Capstone-only disassembly.
+*** 2026-02-20: Fixed bank2/3 vector table ($FFD6-$FFFF) — now emits
+*** proper .word entries instead of misidentified instructions.
+===================================================
 Splits 128KB Delco HC11 bins into 3 flash banks per OSE Flash Tool mapping,
 disassembles each bank with Capstone M680X (HC11 mode), and diffs STOCK vs Enhanced.
 
@@ -623,7 +631,14 @@ def disassemble_bank(bank_data, cpu_base, bank_name, name, output_dir):
             code_start = 0
 
         # Linear sweep for remaining code
-        code_data = bank_data[code_start:]
+        # For bank2/3: stop at $FFD6 (vector table) and emit vectors as .word
+        vector_start = 0xFFD6  # First vector address
+        if bank_name in ("bank2", "bank3"):
+            # Only disassemble code up to the vector table
+            code_end_offset = vector_start - cpu_base
+            code_data = bank_data[code_start:code_end_offset]
+        else:
+            code_data = bank_data[code_start:]
         code_base = cpu_base + code_start
 
         f.write(f"\n\n; === Code region ${code_base:04X}-${cpu_base + bank_size - 1:04X} ===\n\n")
@@ -642,6 +657,34 @@ def disassemble_bank(bank_data, cpu_base, bank_name, name, output_dir):
                     (insn.address, insn.mnemonic, insn.op_str))
             f.write(f"L{insn.address:04X}:  {raw_bytes:15s}  {insn.mnemonic:8s} {insn.op_str}{reg_comment}\n")
             insn_count += 1
+
+        # For bank2/3: emit vector table as .word address entries
+        if bank_name in ("bank2", "bank3"):
+            f.write(f"\n; === Interrupt Vector Table ${vector_start:04X}-$FFFF ===\n")
+            f.write(f"; NOTE: These are 16-bit address pointers, not instructions.\n")
+            f.write(f"; Bank {bank_name[-1]} may use BRA trampolines ($20 xx) or direct\n")
+            f.write(f"; address pointers ($C0 xx, etc.) depending on ROM variant.\n\n")
+            for vec_addr in sorted(VECTORS.keys()):
+                if vec_addr < vector_start:
+                    continue
+                offset = vec_addr - cpu_base
+                if offset + 1 < bank_size:
+                    hi = bank_data[offset]
+                    lo = bank_data[offset + 1]
+                    target = (hi << 8) | lo
+                    vec_name = VECTORS[vec_addr]
+                    raw = f"{hi:02X} {lo:02X}"
+                    # Detect if it's a BRA trampoline or a direct pointer
+                    if hi == 0x20:  # BRA opcode
+                        # Calculate BRA target: PC + 2 + signed offset
+                        signed_lo = lo if lo < 128 else lo - 256
+                        bra_target = vec_addr + 2 + signed_lo
+                        f.write(f"\n; --- Vector: {vec_name} ---\n")
+                        f.write(f"L{vec_addr:04X}:  {raw:15s}  bra      ${bra_target:04X}            ; BRA trampoline -> ${bra_target:04X}\n")
+                    else:
+                        f.write(f"\n; --- Vector: {vec_name} ---\n")
+                        f.write(f"L{vec_addr:04X}:  {raw:15s}  .word    ${target:04X}            ; -> {vec_name} handler at ${target:04X}\n")
+                    insn_count += 1
 
         # === Register Variant Analysis Summary ===
         f.write(f"\n; {'=' * 72}\n")

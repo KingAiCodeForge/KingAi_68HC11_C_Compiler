@@ -26,6 +26,7 @@ Example:
 """
 
 import sys
+import os
 from pathlib import Path
 from datetime import datetime
 
@@ -355,12 +356,14 @@ HC11_REGISTERS = {
     0x0032: "ADR2",
     0x0033: "ADR3",
     0x0034: "ADR4",
-    0x003D: "OPTION",
-    0x003E: "COPRST",
-    0x003F: "PPROG",
-    0x0039: "INIT",
-    0x003A: "TEST1",
-    0x003B: "CONFIG",
+    0x0035: "BPROT",     # Block protect (EEPROM write protect)
+    0x0039: "OPTION",    # System config options
+    0x003A: "COPRST",    # COP watchdog reset
+    0x003B: "PPROG",     # EEPROM programming control
+    0x003C: "HPRIO",     # Highest priority I-bit + misc
+    0x003D: "INIT",      # RAM/IO mapping register
+    0x003E: "TEST1",     # Factory test (reserved)
+    0x003F: "CONFIG",    # System configuration register
 }
 
 # ====================================================================
@@ -369,15 +372,16 @@ HC11_REGISTERS = {
 
 def find_vy_binaries():
     """Search for VY V6 Enhanced binaries in common locations"""
+    _project_root = Path(__file__).resolve().parent.parent
     search_paths = [
-        Path(r"R:\VY_V6_Assembly_Modding\bins"),
-        Path(r"R:\VY_V6_Assembly_Modding\test_bins"),
-        Path(r"C:\Repos\Holden_Analysis"),
-        Path(r"A:\repos\Holden_Analysis"),
-        Path(r"A:\repos\VY_V6_Assembly_Modding\bins"),
-        Path(r"E:\Users\jason\Documents"),
-        Path(r"C:\Users\jason\OneDrive\Documents"),
+        _project_root,
+        _project_root / "bins",
+        _project_root / "xdfs_and_adx_and_bins_related_to_project",
+        Path(os.environ.get("VY_BIN_DIR", "")) if os.environ.get("VY_BIN_DIR") else None,
+        Path.cwd(),
+        Path.cwd().parent,
     ]
+    search_paths = [p for p in search_paths if p is not None]
     
     bin_patterns = [
         "*Enhanced*.bin",
@@ -397,12 +401,15 @@ def find_vy_binaries():
 
 def find_xdf_files():
     """Search for XDF definition files"""
+    _project_root = Path(__file__).resolve().parent.parent
     search_paths = [
-        Path(r"C:\Users\jason\OneDrive\Documents\TunerPro Files"),
-        Path(r"R:\VY_V6_Assembly_Modding\xdfs"),
-        Path(r"A:\repos\VY_V6_Assembly_Modding\xdfs"),
-        Path(r"E:\Users\jason\Documents\TunerPro Files"),
+        _project_root,
+        _project_root / "xdfs_and_adx_and_bins_related_to_project",
+        _project_root / "xdf_exports",
+        Path(os.environ.get("VY_XDF_DIR", "")) if os.environ.get("VY_XDF_DIR") else None,
+        Path.cwd(),
     ]
+    search_paths = [p for p in search_paths if p is not None]
     
     found_xdfs = []
     for search_path in search_paths:

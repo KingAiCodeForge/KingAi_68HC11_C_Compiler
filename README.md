@@ -4,7 +4,7 @@ Built from the ground up alongside working Python 68HC11 disassembly and patchin
 
 A subset-C cross-compiler targeting the Motorola 68HC11, built for writing custom code patches for Delco automotive ECUs (Holden VN–VY V6, GM OBD1).
 
-**Status: alpha — compiles C to HC11 assembly, assembles to binary/S19, patches into ROMs.** The complete pipeline (C → ASM → binary → patched PROM) works end-to-end. Hardware validation on a real ECU is the remaining gate. still treat as WIP needs more testing with more inputs that matter. the whole ose in one .c no overflow following original trans , rewriting and reducing the code , remove parts that make it so it have to use the split 6400rpm main spark system, it would be better to have just one table not a high and low. if anyone has ideas on how this could be done, or know what reason its in two parts from factory. what could i remove to make this one of the end goals. for this specific ecu.
+**Status: alpha — compiles C to HC11 assembly, assembles to binary/S19, patches into ROMs.** The complete pipeline (C → ASM → binary → patched PROM) works end-to-end. Hardware validation on a real ECU is the remaining gate. still treat as WIP needs more testing, remove parts that make it doesnt use the split 6400rpm main spark system, it would be better to have just one table not a high 4800rpm-6400rpm and low. if anyone has ideas on how this could be done, or know what reason its in two parts from factory. what could i remove to make this one of the end goals. for this specific ecu.
  
 ## What It Does Right Now
 
@@ -87,8 +87,7 @@ Output (abbreviated):
 ```asm
 ; ============================================
 ; KingAI 68HC11 C Compiler Output
-; Target: VY V6 PCM (09356445) - HC11F1(unconfirmed could be E or G or other series each have minor difference in the ram address.  have to assume its one of them E or F maybe. 
-Will add each code disasm below later.
+; Target: VY V6 PCM (09356445) - HC11F-family (HC11FC0 mask per DARC)
 ; ============================================
 
 ; -- Memory Configuration --
@@ -220,7 +219,7 @@ That repository contains:
 - **Full binary disassemblies** split by bank
 - **XDF definitions** for VS, VT, VX, VY (V6 NA, V6 S/C, V8) — all with 68 DTC flags
 - **RAM validation research** ($0046 bit analysis, $01A0 scratch byte, runtime methodology)
-- Free ROM space mapped at $0C468–$0FFBF
+- Free ROM space mapped: **Tier 1** (always-visible) 1,370 bytes at `$3E87`, `$5C31`, `$5D05`, `$6559`; **Tier 2** (bank1 overlay) 15,192 bytes at CPU `$C468`–`$FFBF` (file `0x0C468`–`0x0FFBF`)
 
 All of that was done the old-school way: hand-written assembly, manually hex-patched into the binary with a hex editor, with a lot of time and manual effort across multiple tools. Every patch is a `.asm` file that has to be assembled externally and byte-copied into the ROM image at the correct offset.
 
@@ -294,6 +293,17 @@ The compiler architecture is processor-independent up to the code generator. The
 - Register allocation improvements — currently spills to stack aggressively
 - Hardware validation — needs bench test on real ECU with oscilloscope
 - 68K/68332 backend — different instruction set, would need a separate repo. The compiler architecture (lexer/parser/AST/optimizer) is reusable, only codegen needs rewriting per target. Applicable to any ECU platform with a known opcode map and memory layout.
+
+## Cross-References
+
+| Related Project | Connection |
+|----------------|------------|
+| **KingAI Commie Flasher** | Flash tool that writes compiled patches to ECU. Hello world kernel (in `examples/`) uploads via flasher's Mode 6 mechanism |
+| **VY V6 Assembly Modding** | Target platform — spark cut patches to be rewritten in C using this compiler |
+| **11P Disassembler (64KB)** | Disassembly of 808/424 binaries — complements `hc11kit disasm` for stock vs enhanced binary analysis |
+| **11P Local Documentation** | XDF address map and calibration analysis — reference for writing patches |
+| **SRAM Brick Recovery Device** | Hardware safety net for testing compiled patches — instant brick recovery |
+| **MEMCAL Live Tuner Plan** | Real-time tuning device — eventual target for compiled code deployment without flashing |
 
 ## License
 

@@ -1,0 +1,58 @@
+﻿Description Send data (‘X’-ACSII) Receive data  (‘X’-ACSII)  
+Notes 
+Request  firmware  version  
+‘V’+’V’ X+Y+’+’ X – minor, Y – major, ‘+’ – hardware ID.  
+Write to  
+emulator  
+memory  
+Bulk write to  a memory  area  
+'W'+n+MMSBe+MSB e+LSBe+B1e+..+Bne +CS  
+'Z'+'W'+n+MMSBe+ MSBe+B1e+..+B(n*2 56)e+CS  
+‘O’ Write a block of n bytes to the emulator starting at  address MMSB:MSB:LSB with only the lowest 4  
+bits of the MMSB being significant. For 256 bytes,  
+use n=0. The upper 4 bits of the MMSB will dictate  
+how the write cycle works (1).  
+‘O’ Write a block of n bytes to the emulator starting at  address MMSB:MSB:LSB with only the lowest 4  
+bits of the MMSB being significant. N=n*256 bytes.  
+For 64kbytes, use n=0. The upper 4 bits of the  
+MMSB will dictate how the write cycle works (1).  
+Recommended 4k blocks use (n=16).  
+Bulk read 
+from memory  area  
+'Z'+'R'+n+MMSBe+MS Be+CS  
+B1+..+B(n*256)+ CS  
+Returns 'n*256' bytes B1…B(n*256) starting at  emulation address MMSB:MSB:00 with only the lowest  4 bits of the MMSB being significant. For 256 bytes, use  n=0. The upper 4 bits of the MMSB will dictate how the  write cycle works (1). Recommended 4k blocks use  (n=16). 
+Query serial  number  
+‘N’+’S’+CS B0+B1+..+B8+CS B0 is vendor ID byte, B1..B8 is serial number. 
+Address hit  tracing  
+request  
+'T'+x1+x2+x3+y1+y2+ sMMSB+sMSB+sLSB+e MMSB+eMSB+eLSB+C S  
+'O'+MMSB+MSB +LSB+'O'  
+X1,x2,x3,y1,y2 – reserved, can be any value.  Currently works for one-time requests in real time: 1  request = 1 hit response in the range. The upper 4 bits  of the MMSB will dictate memory area (1).  
+Full memory  erase  
+Change  
+Emulated  
+memory type  Emulated  
+memory type  Backup  
+battery charge  Bluetooth  
+module  
+baudrate  
+Special commands  
+‘E’+’M’+’F’ ‘O’` Full quick cleaning of the emulator memory. Memory  will be filled with 0xFF.  
+‘M’+x ‘O’ X: ‘2’ – 28/29F200; ‘4’ – 29F400; ‘8’ – 29F800  Use this command to make sure the emulated memory  
+type is correct for proper operation.  
+‘M’+’?’ X X: ‘2’ – 28/29F200; ‘4’ – 29F400; ‘8’ – 29F800.   
+‘A’+’V’ B1+…+B4 just 4 bytes ACSII number. The value is presented in mV.  Example: 2995 = 2.995V.  
+‘l’+x ‘O’ X: ‘H’ – high speed (921600), ‘L’ – low speed (115200).  The function is available only starting from v1.40.  
+
+
+Software reset 
+	‘Q’ 
+	- 
+	Simply restarting the emulator is equivalent to turning  off the power. 
+	
+
+
+
+Additional notes:  
+1. FlashOnline have 1024k memory (or 512x16) organization, to write files 256k (28 / 29F200)  MMSB must be 0x0C, for 512k (29F400) it is 0x08, for 1024k (29F800) it is 0x0, respectively.  2. CS – is Check Sum. Are just 8-bit additive of the rest of the request, no carry.

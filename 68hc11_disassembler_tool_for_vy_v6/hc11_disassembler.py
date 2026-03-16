@@ -192,36 +192,48 @@ HC11_DIRECT_PAGE_REGISTERS = {
     0x32: "ADR2",     # A/D Result 2
     0x33: "ADR3",     # A/D Result 3
     0x34: "ADR4",     # A/D Result 4
+    0x35: "BPROT",    # Block Protect (EEPROM write protect)
     0x39: "OPTION",   # System Configuration Options
     0x3A: "COPRST",   # COP Reset Register
     0x3B: "PPROG",    # EEPROM Programming Control
+    0x3C: "HPRIO",    # Highest Priority I-bit + misc
     0x3D: "INIT",     # RAM/IO Mapping Register
     0x3E: "TEST1",    # Test Register 1
     0x3F: "CONFIG",   # Configuration Register
 }
 
-# VY V6 RAM Variables (from XDF analysis - common addresses)
+# VY V6 RAM Variables (from XDF analysis + binary scan)
 VY_V6_RAM_VARIABLES = {
-    0x9D: "RPM_16BIT_LO",   # 16-bit RPM (low byte) - used by The1's spark cut
-    0x9E: "RPM_16BIT_HI",   # 16-bit RPM (high byte)
-    0xA2: "RPM_8BIT",       # 8-bit RPM (÷25, max 6375)
-    0xA3: "ENGINE_STATE",   # Engine state flags
+    0x42: "ALDL_MODE",       # ALDL diagnostic mode byte
+    0x46: "MODE_FLAGS",      # Engine mode flags (run/crank/etc)
+    0x47: "MODE_FLAGS_2",    # Secondary mode flags
+    0x80: "ENGINE_STATUS",   # Engine status byte
+    0x83: "COOLANT_TEMP",    # Coolant temperature (filtered)
+    0x97: "SPARK_ADVANCE",   # Current spark advance
+    0x98: "DWELL_TIME",      # Current dwell time
+    0x9D: "ENGINE_STATE",    # Engine state flags
+    0x9E: "GEAR_STATE",      # Current gear state
+    0xA2: "RPM_8BIT",        # 8-bit RPM (/25, max 6375)
+    0xA3: "RPM_HIGH",        # RPM high byte (for rev limiter)
+    0xB6: "MAP_VALUE",       # Manifold Absolute Pressure
+    0xC4: "INJ_PW_H",       # Injector pulse width high byte
+    0xC5: "INJ_PW_L",       # Injector pulse width low byte
+    0xF3: "TPS_FILTERED",   # Throttle Position (filtered)
 }
 
 
 def find_vy_binaries():
     """Search for VY V6 Enhanced binaries in common locations"""
+    _project_root = Path(__file__).resolve().parent.parent
     search_paths = [
-        Path(r"A:\VY_V6_Assembly_Modding"),
-        Path(r"A:\VY_V6_Assembly_Modding\bins"),
-        Path(r"R:\VY_V6_Assembly_Modding\bins"),
-        Path(r"R:\VY_V6_Assembly_Modding\test_bins"),
-        Path(r"C:\Repos\Holden_Analysis"),
-        Path(r"A:\repos\Holden_Analysis"),
-        Path(r"A:\repos\VY_V6_Assembly_Modding\bins"),
+        _project_root,
+        _project_root / "bins",
+        _project_root / "xdfs_and_adx_and_bins_related_to_project",
+        Path(os.environ.get("VY_BIN_DIR", "")) if os.environ.get("VY_BIN_DIR") else None,
         Path.cwd(),
         Path.cwd().parent,
     ]
+    search_paths = [p for p in search_paths if p is not None]
     
     bin_patterns = [
         "*Enhanced*.bin",
@@ -245,15 +257,15 @@ def find_vy_binaries():
 
 def find_xdf_files():
     """Search for XDF definition files in common locations"""
+    _project_root = Path(__file__).resolve().parent.parent
     search_paths = [
-        Path(r"A:\VY_V6_Assembly_Modding"),
-        Path(r"A:\VY_V6_Assembly_Modding\xdfs_and_adx_and_bins_related_to_project"),
-        Path(r"C:\Users\jason\OneDrive\Documents\TunerPro Files"),
-        Path(r"R:\VY_V6_Assembly_Modding\xdfs"),
-        Path(r"A:\repos\VY_V6_Assembly_Modding\xdfs"),
-        Path(r"E:\Users\jason\Documents\TunerPro Files"),
+        _project_root,
+        _project_root / "xdfs_and_adx_and_bins_related_to_project",
+        _project_root / "xdf_exports",
+        Path(os.environ.get("VY_XDF_DIR", "")) if os.environ.get("VY_XDF_DIR") else None,
         Path.cwd(),
     ]
+    search_paths = [p for p in search_paths if p is not None]
     
     found_xdfs = []
     for search_path in search_paths:
@@ -1659,10 +1671,11 @@ def main():
     
     if binary_path is None:
         # Auto-detect binary path (legacy behavior)
+        _project_root = Path(__file__).resolve().parent.parent
         search_paths = [
-            r"R:\VY_V6_Assembly_Modding\VX-VY_V6_$060A_Enhanced_v1.0a - Copy.bin",
-            r"A:\VY_V6_Assembly_Modding\92118883_STOCK.bin",
-            r"A:\VY_V6_Assembly_Modding\VX-VY_V6_$060A_Enhanced_v1.0a.bin",
+            str(_project_root / "bins" / "VX-VY_V6_$060A_Enhanced_v1.0a.bin"),
+            str(_project_root / "bins" / "92118883_STOCK.bin"),
+            str(_project_root / "xdfs_and_adx_and_bins_related_to_project" / "VX-VY_V6_$060A_Enhanced_v1.0a.bin"),
         ]
         for path in search_paths:
             if Path(path).exists():

@@ -44,7 +44,7 @@
 
 | Resource | Path | Value for Emulator |
 |----------|------|-------------------|
-| **Bank 1 binary** (64KB) | `bank_split_output/Enhanced_v1.0a_bank1.bin` | RAM ($0000-$03FF), I/O ($1000-$103F), calibration ($4000-$7FFF), code ($8000-$FFFF), vectors ($FFC0-$FFFF) |
+| **Bank 1 binary** (64KB) | `bank_split_output/Enhanced_v1.0a_bank1.bin` | RAM ($0000-$03FF), I/O ($1000-$105F), calibration ($4000-$7FFF), code ($8000-$FFFF), vectors ($FFC0-$FFFF) |
 | **Bank 2 binary** (32KB) | `bank_split_output/Enhanced_v1.0a_bank2.bin` | Engine code overlay at $8000-$FFFF (dwell calc, TIC3 ISR, dense math) |
 | **Bank 3 binary** (32KB) | `bank_split_output/Enhanced_v1.0a_bank3.bin` | Transmission/diagnostic overlay at $8000-$FFFF |
 
@@ -98,7 +98,7 @@ We used **6 different disassembly approaches**. Four produce agreeing output and
 | **Bank awareness** | **Full** — `--bank bank1|bank2|bank3|full` flag + auto-detect from filename/size |
 | **ISR tracing** | **Yes** — vector table parsing at $FFC0-$FFFF, ISR handler entry point tracing with call depth analysis |
 | **XDF integration** | **YES — 2,234 calibration definitions** (v2.09b-beta) or 1,757 (v2.09a) loaded as address labels. Shows parameter names inline in disassembly |
-| **RPM/Timer detection** | **YES** — 99 RPM comparisons found, 50+ timer/I/O register accesses identified, named HC11 I/O registers ($1000-$103F: TCTL1, PORTG, ADR1, etc.) |
+| **RPM/Timer detection** | **YES** — 99 RPM comparisons found, 50+ timer/I/O register accesses identified, named HC11 I/O registers ($1000-$105F: TCTL1, PORTG, ADR1, etc.) |
 | **Calibration cross-refs** | **YES** — 945 calibration reads identified in bank2 alone, links code to XDF parameter names |
 | **Address accuracy** | **CORRECT** — verified at $81E1 |
 | **Strengths** | **Best analytical output** for ECU reverse engineering. Only tool with XDF overlay, RPM threshold detection, I/O register naming, ISR tracing, and calibration cross-referencing. Modular architecture via `tools/core/` (opcodes.py, vy_v6_constants.py, address_conversion.py). Bank-split support verified Feb 14, 2026 |
@@ -236,7 +236,7 @@ Clock:      3.408 MHz E-clock (external crystal, Delco-specific)
 ```
 $0000-$03FF   Internal RAM          1,024 bytes   Read/Write
 $0400-$0FFF   Extended RAM           3,072 bytes   Read/Write (PCM-specific)
-$1000-$103F   I/O Registers            64 bytes   Peripheral control
+$1000-$105F   I/O Registers            96 bytes   Peripheral control (HC11F extended)
 $1040-$3FFF   External RAM/Unused   12,224 bytes   PCM-specific
 $4000-$7FFF   Flash Calibration     16,384 bytes   The "tune" — tables, scalars
 $8000-$BFFF   ROM Bank Window       16,384 bytes   Bank-switched overlay
@@ -307,7 +307,7 @@ The emulator fetches opcodes, decodes them, updates registers and memory.
 | **Bank switching** | Medium | The binary uses 3 banks — code in bank 2 won't be reachable without it. Need to intercept PORTG writes and swap the $8000-$FFFF window. |
 | **Interrupt handling** | Medium | The main loop is interrupt-driven. TIC3 (24X crank), TOC1 (main timer), SCI — these fire constantly. Without IRQ dispatch the code won't advance past the idle loop. |
 | **Virtual sensor injection** | Easy | ADC channels need simulated values (RPM from virtual crank, TPS, MAP, coolant, IAT). Framework exists in adc.py — just needs VY V6 channel map. |
-| **I/O register completeness** | Medium | 64 I/O registers at $1000-$103F. Many control hardware: SPI (slave select for ADC chip), timers, COP watchdog. Missing handlers → code hangs or crashes. |
+| **I/O register completeness** | Medium | 96 I/O registers at $1000-$105F. Many control hardware: SPI (slave select for ADC chip), timers, COP watchdog. Missing handlers → code hangs or crashes. |
 | **COP watchdog** | Easy | Must be fed periodically or the CPU resets. Either disable it or add an auto-feed. |
 | **EEPROM emulation** | Easy | $FE00-$FFBF needs to persist between runs (learned values, DTCs). Just save to a file. |
 
@@ -505,7 +505,7 @@ Upgrade the existing emulator:
 
 | Resource | Path | Value for Emulator |
 |----------|------|-------------------|
-| **Bank 1 binary** (64KB) | `bank_split_output/Enhanced_v1.0a_bank1.bin` | RAM ($0000-$03FF), I/O ($1000-$103F), calibration ($4000-$7FFF), code ($8000-$FFFF), vectors ($FFC0-$FFFF) |
+| **Bank 1 binary** (64KB) | `bank_split_output/Enhanced_v1.0a_bank1.bin` | RAM ($0000-$03FF), I/O ($1000-$105F), calibration ($4000-$7FFF), code ($8000-$FFFF), vectors ($FFC0-$FFFF) |
 | **Bank 2 binary** (32KB) | `bank_split_output/Enhanced_v1.0a_bank2.bin` | Engine code overlay at $8000-$FFFF (dwell calc, TIC3 ISR, dense math) |
 | **Bank 3 binary** (32KB) | `bank_split_output/Enhanced_v1.0a_bank3.bin` | Transmission/diagnostic overlay at $8000-$FFFF |
 
@@ -559,7 +559,7 @@ We used **6 different disassembly approaches**. Four produce agreeing output and
 | **Bank awareness** | **Full** — `--bank bank1|bank2|bank3|full` flag + auto-detect from filename/size |
 | **ISR tracing** | **Yes** — vector table parsing at $FFC0-$FFFF, ISR handler entry point tracing with call depth analysis |
 | **XDF integration** | **YES — 2,234 calibration definitions** (v2.09b-beta) or 1,757 (v2.09a) loaded as address labels. Shows parameter names inline in disassembly |
-| **RPM/Timer detection** | **YES** — 99 RPM comparisons found, 50+ timer/I/O register accesses identified, named HC11 I/O registers ($1000-$103F: TCTL1, PORTG, ADR1, etc.) |
+| **RPM/Timer detection** | **YES** — 99 RPM comparisons found, 50+ timer/I/O register accesses identified, named HC11 I/O registers ($1000-$105F: TCTL1, PORTG, ADR1, etc.) |
 | **Calibration cross-refs** | **YES** — 945 calibration reads identified in bank2 alone, links code to XDF parameter names |
 | **Address accuracy** | **CORRECT** — verified at $81E1 |
 | **Strengths** | **Best analytical output** for ECU reverse engineering. Only tool with XDF overlay, RPM threshold detection, I/O register naming, ISR tracing, and calibration cross-referencing. Modular architecture via `tools/core/` (opcodes.py, vy_v6_constants.py, address_conversion.py). Bank-split support verified Feb 14, 2026 |
@@ -697,7 +697,7 @@ Clock:      3.408 MHz E-clock (external crystal, Delco-specific)
 ```
 $0000-$03FF   Internal RAM          1,024 bytes   Read/Write
 $0400-$0FFF   Extended RAM           3,072 bytes   Read/Write (PCM-specific)
-$1000-$103F   I/O Registers            64 bytes   Peripheral control
+$1000-$105F   I/O Registers            96 bytes   Peripheral control (HC11F extended)
 $1040-$3FFF   External RAM/Unused   12,224 bytes   PCM-specific
 $4000-$7FFF   Flash Calibration     16,384 bytes   The "tune" — tables, scalars
 $8000-$BFFF   ROM Bank Window       16,384 bytes   Bank-switched overlay
@@ -768,7 +768,7 @@ The emulator fetches opcodes, decodes them, updates registers and memory.
 | **Bank switching** | Medium | The binary uses 3 banks — code in bank 2 won't be reachable without it. Need to intercept PORTG writes and swap the $8000-$FFFF window. |
 | **Interrupt handling** | Medium | The main loop is interrupt-driven. TIC3 (24X crank), TOC1 (main timer), SCI — these fire constantly. Without IRQ dispatch the code won't advance past the idle loop. |
 | **Virtual sensor injection** | Easy | ADC channels need simulated values (RPM from virtual crank, TPS, MAP, coolant, IAT). Framework exists in adc.py — just needs VY V6 channel map. |
-| **I/O register completeness** | Medium | 64 I/O registers at $1000-$103F. Many control hardware: SPI (slave select for ADC chip), timers, COP watchdog. Missing handlers → code hangs or crashes. |
+| **I/O register completeness** | Medium | 96 I/O registers at $1000-$105F. Many control hardware: SPI (slave select for ADC chip), timers, COP watchdog. Missing handlers → code hangs or crashes. |
 | **COP watchdog** | Easy | Must be fed periodically or the CPU resets. Either disable it or add an auto-feed. |
 | **EEPROM emulation** | Easy | $FE00-$FFBF needs to persist between runs (learned values, DTCs). Just save to a file. |
 

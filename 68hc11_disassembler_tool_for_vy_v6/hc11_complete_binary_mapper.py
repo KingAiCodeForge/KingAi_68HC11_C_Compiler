@@ -217,8 +217,8 @@ class HC11CompleteBinaryMapper:
             0xFFE4: "Timer Output Compare 3",
             0xFFE6: "Timer Output Compare 2",
             0xFFE8: "Timer Output Compare 1",
-            0xFFEA: "Timer Input Capture 3 (CRANK 3X)",
-            0xFFEC: "Timer Input Capture 2",
+            0xFFEA: "Timer Input Capture 3 (CRANK 24X)",
+            0xFFEC: "Timer Input Capture 2 (CAM Sensor)",
             0xFFEE: "Timer Input Capture 1",
             0xFFF0: "Real-Time Interrupt",
             0xFFF2: "IRQ External Pin",
@@ -241,7 +241,7 @@ class HC11CompleteBinaryMapper:
                     size=2,
                     name=name,
                     confidence="[OK] Known",
-                    evidence=["HC11E9 vector table specification"],
+                    evidence=["HC11F vector table specification"],
                     related_addresses=[target],
                     notes=f"Points to ISR at 0x{target:04X}"
                 ))
@@ -294,7 +294,7 @@ class HC11CompleteBinaryMapper:
             "TOC3": (32, "EST control", "[OK] Known"),
             "TOC4": (39, "Fuel injector timing", "[WARN]️ Inferred"),
             "TOC5": (25, "Unknown output", "❓ Unknown"),
-            "TIC3": (48, "Crank 3X input", "[OK] Known"),
+            "TIC3": (48, "Crank 24X input", "[OK] Known"),
             "TIC2": (0, "Unknown input", "❓ Unknown"),
             "TIC1": (0, "Unknown input", "❓ Unknown"),
             "TCNT": (7, "Timer counter", "[OK] Known"),

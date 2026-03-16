@@ -33,6 +33,22 @@ tests/_*.py
 test_sparkcut.asm
 tests/test_sparkcut.asm
 
+# Generated disassembly outputs (reproducible from tools + source .asm)
+*_labeled.asm
+*_labeled_v2.asm
+*_gnu.asm
+*_udis.asm
+
+# TunerPro / XDF / ADX files (3rd party definitions, large binaries)
+*.xdf
+*.adx
+*.ecu
+*.ads
+
+# Binary protocol docs (potential copyright issues)
+*.pdf
+*.docx
+
 # IDE
 .vscode/
 .idea/
