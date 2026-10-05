@@ -9,8 +9,10 @@ import os
 import sys
 from pathlib import Path
 
-from hc11_compiler.codegen import TARGET_PROFILES
+from hc11_compiler.codegen import CodeGenError, TARGET_PROFILES
 from hc11_compiler.linker import LinkError, link_objects
+from hc11_compiler.lexer import LexerError
+from hc11_compiler.parser import ParseError
 from hc11_compiler.objectfile import (
     ObjectFormatError,
     RelocatableObject,
@@ -214,7 +216,10 @@ def main() -> int:
     args = parser.parse_args()
     try:
         return int(args.func(args))
-    except (OSError, ValueError, ObjectFormatError, ResourceMapError, LinkError) as exc:
+    except (
+        OSError, ValueError, LexerError, ParseError, CodeGenError,
+        ObjectFormatError, ResourceMapError, LinkError,
+    ) as exc:
         print(f"hc11kcos: error: {exc}", file=sys.stderr)
         return 1
 
