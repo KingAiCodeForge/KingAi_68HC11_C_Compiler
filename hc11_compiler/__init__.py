@@ -29,6 +29,13 @@ from .ast_nodes import *
 from .parser import Parser
 from .codegen import CodeGenerator
 from .assembler import Assembler, AssemblerError, assemble, assemble_to_s19
+from .objectfile import (
+    KCOS_ABI, OBJECT_MAGIC, OBJECT_VERSION, ObjectFormatError,
+    ObjectSymbol, RelocatableObject, compile_kcos_module, compile_object,
+)
+from .resource_map import (
+    Allocation, MemoryRegion, ResourceCollisionError, ResourceMap, ResourceMapError,
+)
 
 def compile_source(source: str, *, org: int = 0x8000, stack: int = 0x00FF,
                    target: str = "generic", output: str = "asm") -> str:
@@ -67,7 +74,17 @@ def compile_source(source: str, *, org: int = 0x8000, stack: int = 0x00FF,
         return bytes(assembler.binary)
     elif output == 'listing':
         return assembler.get_listing()
-    elif output == 'listing':
-        return assembler.get_listing()
     else:
         return asm_text
+
+
+def link_objects(objects, *, resource_map=None):
+    """Lazy public wrapper to avoid an import cycle at package import time."""
+    from .linker import link_objects as _link_objects
+    return _link_objects(objects, resource_map=resource_map)
+
+
+def link_sources(sources, *, target="generic", resource_map=None):
+    """Compile named translation units and link them into one image."""
+    from .linker import link_sources as _link_sources
+    return _link_sources(sources, target=target, resource_map=resource_map)
