@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field, fields
 from typing import Dict, Iterable, List, Optional
 
 from .ast_nodes import ASTNode, FuncCall, FuncDecl, Identifier, Program, VarDecl
+from .assembler import Assembler, AssemblerError
 from .codegen import CodeGenerator
 from .lexer import Lexer
 from .parser import Parser
@@ -225,7 +227,146 @@ def compile_object(source: str, *, module_name: str,
     )
 
 
+def _sanitize_module_name(module_name: str) -> str:
+    return "".join(c if (c.isalnum() or c == "_") else "_" for c in module_name)
+
+
+def _symbol_table(entries, default_kind: str = "function") -> Dict[str, str]:
+    """Normalize iterable/dict symbol declarations to name -> kind."""
+    if entries is None:
+        return {}
+    if isinstance(entries, dict):
+        result = {str(k): str(v) for k, v in entries.items()}
+    else:
+        result = {}
+        for item in entries:
+            if isinstance(item, ObjectSymbol):
+                result[item.name] = item.kind
+            elif isinstance(item, str):
+                if ":" in item:
+                    name, kind = item.rsplit(":", 1)
+                    result[name] = kind
+                else:
+                    result[item] = default_kind
+            else:
+                raise ObjectFormatError(
+                    f"Unsupported symbol declaration: {item!r}"
+                )
+    for name, kind in result.items():
+        if kind not in ("function", "data"):
+            raise ObjectFormatError(
+                f"{name}: symbol kind must be 'function' or 'data', got {kind!r}"
+            )
+    return result
+
+
+def compile_asm_object(assembly: str, *, module_name: str,
+                       target: str = "generic", exports=None, imports=None,
+                       resources=None) -> RelocatableObject:
+    """Wrap relocatable HC11 assembly in K11O with module-local label namespacing.
+
+    A source ORG of zero is accepted as an object-relative declaration and
+    removed. Any non-zero ORG is rejected because final placement belongs to
+    the resource linker.
+    """
+    module = _sanitize_module_name(module_name)
+    export_map = _symbol_table(exports)
+    import_map = _symbol_table(imports)
+    overlap = set(export_map) & set(import_map)
+    if overlap:
+        raise ObjectFormatError(
+            "Symbols cannot be both imported and exported: "
+            + ", ".join(sorted(overlap))
+        )
+
+    # Strip only object-relative ORG $0000 / ORG 0 declarations.
+    kept_lines = []
+    org_re = re.compile(r"^\s*ORG\s+([^;\s]+)", re.IGNORECASE)
+    for lineno, line in enumerate(assembly.splitlines(), 1):
+        code = line.split(";", 1)[0]
+        match = org_re.match(code)
+        if match:
+            token = match.group(1)
+            try:
+                value = int(token[1:], 16) if token.startswith("$") else int(token, 0)
+            except ValueError as exc:
+                raise ObjectFormatError(
+                    f"Line {lineno}: relocatable ORG must be a numeric zero"
+                ) from exc
+            if value != 0:
+                raise ObjectFormatError(
+                    f"Line {lineno}: absolute ORG {token} is not relocatable"
+                )
+            continue
+        kept_lines.append(line)
+    normalized = "\n".join(kept_lines).strip() + "\n"
+
+    # Namespace every defined non-export label so ordinary names such as
+    # 'done' or 'invalid' cannot collide between modules.
+    label_re = re.compile(
+        r"^(\s*)([A-Za-z_.$][A-Za-z0-9_.$]*):",
+        re.MULTILINE,
+    )
+    defined = []
+    for match in label_re.finditer(normalized):
+        name = match.group(2)
+        if name in defined:
+            raise ObjectFormatError(f"Duplicate assembly label: {name}")
+        defined.append(name)
+
+    missing_exports = sorted(set(export_map) - set(defined))
+    if missing_exports:
+        raise ObjectFormatError(
+            "Assembly exports are not defined: " + ", ".join(missing_exports)
+        )
+
+    rename = {
+        name: f"__{module}_{name}"
+        for name in defined
+        if name not in export_map
+    }
+    if rename:
+        symbol_token = re.compile(
+            r"(?<![A-Za-z0-9_.$])("
+            + "|".join(re.escape(x) for x in sorted(rename, key=len, reverse=True))
+            + r")(?![A-Za-z0-9_.$])"
+        )
+        out_lines = []
+        for line in normalized.splitlines():
+            code, sep, comment = line.partition(";")
+            code = symbol_token.sub(lambda m: rename[m.group(1)], code)
+            out_lines.append(code + (sep + comment if sep else ""))
+        normalized = "\n".join(out_lines) + "\n"
+
+    # If the object is self-contained, run it through the built-in assembler
+    # now. Imported symbols are intentionally left for the final link pass.
+    if not import_map:
+        probe = f"        ORG     $8000\n{normalized}"
+        try:
+            Assembler().assemble(probe)
+        except AssemblerError as exc:
+            raise ObjectFormatError(
+                f"Assembly object does not assemble cleanly: {exc}"
+            ) from exc
+
+    return RelocatableObject(
+        module=module,
+        target=target,
+        assembly=normalized,
+        source_sha256=hashlib.sha256(assembly.encode("utf-8")).hexdigest(),
+        exports=[
+            ObjectSymbol(name=name, kind=kind)
+            for name, kind in sorted(export_map.items())
+        ],
+        imports=[
+            ObjectSymbol(name=name, kind=kind)
+            for name, kind in sorted(import_map.items())
+        ],
+        resources=[dict(x) for x in (resources or [])],
+    )
+
+
 def compile_kcos_module(source: str, *, module_name: str,
                         target: str = "generic") -> RelocatableObject:
-    """KCOS-named alias for compile_object()."""
+    """Compile a KCOS C translation unit supported by the HC11 C subset."""
     return compile_object(source, module_name=module_name, target=target)
