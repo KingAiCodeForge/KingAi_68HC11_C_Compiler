@@ -133,29 +133,53 @@ def _collect_link_symbols(program: Program):
         d.name for d in program.declarations
         if isinstance(d, FuncDecl) and d.body is not None
     }
+    static_prototypes = {
+        d.name for d in program.declarations
+        if isinstance(d, FuncDecl) and d.body is None and d.is_static
+    }
+    extern_data = {
+        d.name for d in program.declarations
+        if isinstance(d, VarDecl) and d.ctype.is_extern
+    }
 
     exports: Dict[str, ObjectSymbol] = {}
     imports: Dict[str, ObjectSymbol] = {}
+    seen_public_defs = set()
 
     for decl in program.declarations:
-        if isinstance(decl, FuncDecl):
-            if decl.body is not None:
-                if not decl.is_static:
-                    _append_symbol(exports, decl.name, "function")
-            elif decl.name not in function_defs:
-                _append_symbol(imports, decl.name, "function")
-        elif isinstance(decl, VarDecl):
-            if decl.ctype.is_extern:
-                _append_symbol(imports, decl.name, "data")
-            elif not decl.ctype.is_static:
-                _append_symbol(exports, decl.name, "data")
+        if isinstance(decl, FuncDecl) and decl.body is not None and not decl.is_static:
+            if decl.name in seen_public_defs:
+                raise ObjectFormatError(f"Duplicate public definition: {decl.name!r}")
+            seen_public_defs.add(decl.name)
+            _append_symbol(exports, decl.name, "function")
+        elif isinstance(decl, VarDecl) and not decl.ctype.is_extern and not decl.ctype.is_static:
+            if decl.name in seen_public_defs:
+                raise ObjectFormatError(f"Duplicate public definition: {decl.name!r}")
+            seen_public_defs.add(decl.name)
+            _append_symbol(exports, decl.name, "data")
 
-    # A prototype is not required for a cross-module function call. Treat any
-    # call without an in-module definition as an import and let the linker
-    # prove that exactly one provider exists.
+    called_names = set()
+    referenced_identifiers = set()
     for node in _walk_ast(program):
-        if isinstance(node, FuncCall) and node.name not in function_defs:
-            _append_symbol(imports, node.name, "function")
+        if isinstance(node, FuncCall):
+            called_names.add(node.name)
+        elif node.__class__.__name__ == "Identifier":
+            referenced_identifiers.add(node.name)
+
+    # Only references create imports. Merely including a prototype or extern
+    # declaration from a shared header does not make the final link depend on it.
+    for name in sorted(called_names):
+        if name in function_defs:
+            continue
+        if name in static_prototypes:
+            raise ObjectFormatError(
+                f"Static function {name!r} is referenced but has no definition "
+                "in this translation unit"
+            )
+        _append_symbol(imports, name, "function")
+
+    for name in sorted(extern_data & referenced_identifiers):
+        _append_symbol(imports, name, "data")
 
     for name in list(imports):
         if name in exports:
@@ -165,7 +189,6 @@ def _collect_link_symbols(program: Program):
         sorted(exports.values(), key=lambda x: (x.name, x.kind)),
         sorted(imports.values(), key=lambda x: (x.name, x.kind)),
     )
-
 
 def compile_object(source: str, *, module_name: str,
                    target: str = "generic") -> RelocatableObject:
