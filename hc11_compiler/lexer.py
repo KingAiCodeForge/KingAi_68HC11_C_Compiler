@@ -39,6 +39,7 @@ class TokenType(enum.Enum):
     KW_VOLATILE = "volatile"
     KW_CONST = "const"
     KW_STATIC = "static"
+    KW_EXTERN = "extern"
     KW_IF = "if"
     KW_ELSE = "else"
     KW_WHILE = "while"
@@ -141,6 +142,7 @@ KEYWORDS: Dict[str, TokenType] = {
     "volatile": TokenType.KW_VOLATILE,
     "const": TokenType.KW_CONST,
     "static": TokenType.KW_STATIC,
+    "extern": TokenType.KW_EXTERN,
     "if": TokenType.KW_IF,
     "else": TokenType.KW_ELSE,
     "while": TokenType.KW_WHILE,
