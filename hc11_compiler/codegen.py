@@ -6,15 +6,15 @@ Translates the AST into Motorola 68HC11 assembly language.
 Register usage convention:
   - AccA / AccB (8-bit): primary working registers
   - AccD (A:B combined, 16-bit): 16-bit arithmetic
-  - X: index register, used for stack-frame access (via TSX) and pointers
-  - Y: secondary index register, used for second pointer operand
+  - X: transient address/index register for pointers, arrays and member lvalues
+  - Y: stable function frame pointer (callee-saved for normal C functions)
   - SP: stack pointer (grows downward)
 
 Function calling convention:
   - Arguments pushed right-to-left on stack
   - Return value in AccA (8-bit) or AccD (16-bit)
   - Caller cleans up arguments after call
-  - Callee saves/restores X and Y if used
+  - Callee preserves Y; X is caller-clobbered scratch
   - ISRs save all registers automatically (RTI restores them)
 
 Memory layout:
@@ -158,7 +158,7 @@ class CodeGenerator:
         self._zp_alloc = 0x0040                   # Next free zero-page address for globals
         self._ram_alloc = 0x0100                  # Next free extended RAM address for globals
         self._scratch_addr = 0x003F               # Reserved direct-page scratch byte (never allocated)
-        self._scratch_index_addr = 0x003E         # Reserved array-index scratch byte
+        self._scratch_index_addr = 0x003D         # Reserved array-index scratch byte
         self._string_literals: Dict[str, str] = {}    # label -> string data for FCC emission
         self._structs: Dict[str, StructDecl] = {}
         self.resource_requests: List[dict] = []
