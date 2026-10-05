@@ -7,7 +7,7 @@ import json
 from dataclasses import dataclass, field, fields
 from typing import Dict, Iterable, List, Optional
 
-from .ast_nodes import ASTNode, FuncCall, FuncDecl, Program, VarDecl
+from .ast_nodes import ASTNode, FuncCall, FuncDecl, Identifier, Program, VarDecl
 from .codegen import CodeGenerator
 from .lexer import Lexer
 from .parser import Parser
@@ -163,7 +163,7 @@ def _collect_link_symbols(program: Program):
     for node in _walk_ast(program):
         if isinstance(node, FuncCall):
             called_names.add(node.name)
-        elif node.__class__.__name__ == "Identifier":
+        elif isinstance(node, Identifier):
             referenced_identifiers.add(node.name)
 
     # Only references create imports. Merely including a prototype or extern
