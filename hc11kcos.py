@@ -16,6 +16,7 @@ from hc11_compiler.parser import ParseError
 from hc11_compiler.objectfile import (
     ObjectFormatError,
     RelocatableObject,
+    compile_asm_object,
     compile_kcos_module,
 )
 from hc11_compiler.resource_map import ResourceMap, ResourceMapError
@@ -68,6 +69,28 @@ def cmd_compile(args) -> int:
         print(
             f"[hc11kcos] {obj.module}: {len(obj.exports)} export(s), "
             f"{len(obj.imports)} import(s), {len(obj.resources)} resource request(s)",
+            file=sys.stderr,
+        )
+        print(f"[hc11kcos] wrote {output}", file=sys.stderr)
+    return 0
+
+
+def cmd_asm_object(args) -> int:
+    assembly = Path(args.input).read_text(encoding="utf-8")
+    module = args.module or _module_name(args.input)
+    obj = compile_asm_object(
+        assembly,
+        module_name=module,
+        target=args.target,
+        exports=args.export,
+        imports=args.import_symbol,
+    )
+    output = args.output or str(Path(args.input).with_suffix(".k11o"))
+    obj.save(output)
+    if args.verbose:
+        print(
+            f"[hc11kcos] {obj.module}: assembly object, "
+            f"{len(obj.exports)} export(s), {len(obj.imports)} import(s)",
             file=sys.stderr,
         )
         print(f"[hc11kcos] wrote {output}", file=sys.stderr)
@@ -177,6 +200,31 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--target", choices=sorted(TARGET_PROFILES), default="generic")
     c.add_argument("-v", "--verbose", action="store_true")
     c.set_defaults(func=cmd_compile)
+
+    a = sub.add_parser(
+        "asm-object",
+        help="wrap relocatable HC11 assembly as a namespaced .k11o object",
+    )
+    a.add_argument("input")
+    a.add_argument("-o", "--output")
+    a.add_argument("--module")
+    a.add_argument("--target", choices=sorted(TARGET_PROFILES), default="generic")
+    a.add_argument(
+        "--export",
+        action="append",
+        default=[],
+        metavar="NAME[:function|data]",
+        help="public symbol; repeat for multiple exports",
+    )
+    a.add_argument(
+        "--import-symbol",
+        action="append",
+        default=[],
+        metavar="NAME[:function|data]",
+        help="external symbol; repeat for multiple imports",
+    )
+    a.add_argument("-v", "--verbose", action="store_true")
+    a.set_defaults(func=cmd_asm_object)
 
     l = sub.add_parser("link", help="link existing .k11o objects")
     l.add_argument("objects", nargs="+")
