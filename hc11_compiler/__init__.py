@@ -19,9 +19,12 @@ Architecture (for contributors / porters to other languages):
     - codegen.py:   Tree-walk emitter → retarget by changing mnemonics + registers
     - optimizer.py: Peephole on text lines → same pattern works on any asm output
     - assembler.py: Two-pass label resolver → port opcode table for your CPU
+    - objectfile.py: K11O relocatable translation-unit container
+    - resource_map.py: collision-checked ROM/RAM/ZP allocation
+    - linker.py: multi-object symbol/resource linker
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __author__ = "KingAI"
 
 from .lexer import Lexer, Token, TokenType
