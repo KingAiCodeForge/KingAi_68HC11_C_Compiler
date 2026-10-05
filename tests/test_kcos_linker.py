@@ -222,3 +222,66 @@ def test_reserved_rom_hole_is_skipped_and_linked_code_is_collision_checked():
     assert image.base_addr >= 0x8100
     code = next(x for x in image.resource_map.allocations if x.name == "__linked_code__")
     assert code.start >= 0x8100
+
+
+def test_external_data_reference_resolves_and_uses_provider_allocation():
+    provider = compile_object(
+        "unsigned char shared; unsigned char set(void) { shared = 9; return shared; }",
+        module_name="provider",
+        target="vy_v6",
+    )
+    consumer = compile_object(
+        "extern unsigned char shared; unsigned char get(void) { return shared; }",
+        module_name="consumer",
+        target="vy_v6",
+    )
+    assert [(x.name, x.kind) for x in consumer.imports] == [("shared", "data")]
+    image = link_objects([provider, consumer])
+    assert "shared" in image.symbols
+
+
+def test_unused_external_prototype_does_not_create_link_dependency():
+    app = compile_object(
+        r"""
+extern unsigned char optional_hook(unsigned char x);
+unsigned char main(void) { return 1; }
+""",
+        module_name="app",
+        target="vy_v6",
+    )
+    assert app.imports == []
+    assert link_objects([app]).size > 0
+
+
+def test_static_helpers_are_module_namespaced():
+    a = compile_object(
+        r"""
+static unsigned char helper(void) { return 1; }
+unsigned char a(void) { return helper(); }
+""",
+        module_name="mod_a",
+        target="vy_v6",
+    )
+    b = compile_object(
+        r"""
+static unsigned char helper(void) { return 2; }
+unsigned char b(void) { return helper(); }
+""",
+        module_name="mod_b",
+        target="vy_v6",
+    )
+    image = link_objects([a, b])
+    assert "__mod_a_helper" in image.symbols
+    assert "__mod_b_helper" in image.symbols
+
+
+def test_overlapping_logical_pools_still_collision_check_physically():
+    rmap = ResourceMap(regions=[
+        MemoryRegion("zp", "zp", 0x0040, 0x004F),
+        MemoryRegion("ram_alias", "ram", 0x0040, 0x005F),
+        MemoryRegion("rom", "rom", 0x8000, 0x8FFF),
+    ])
+    first = rmap.allocate("zp", 8, 1, "fast", "a")
+    second = rmap.allocate("ram", 8, 1, "normal", "b")
+    assert first.start == 0x0040
+    assert second.start >= 0x0048
