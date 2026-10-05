@@ -175,6 +175,11 @@ class Parser:
         n = int(n_tok.value)
         if n <= 0:
             raise ParseError("Array length must be greater than zero", n_tok)
+        if n > 255:
+            raise ParseError(
+                "Fixed arrays are limited to 255 elements by the HC11 indexed ABI",
+                n_tok,
+            )
         self._expect(TokenType.RBRACKET, "Expected ']' after array length")
         if self._at(TokenType.LBRACKET):
             raise ParseError("Multi-dimensional arrays are not supported yet", self._cur())
