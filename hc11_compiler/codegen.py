@@ -315,13 +315,48 @@ class CodeGenerator:
     # ── Global variable generation ────────────
 
     def _gen_global_var(self, decl: VarDecl):
+        if decl.ctype.size <= 0 and not decl.ctype.is_extern:
+            raise CodeGenError(f"Variable has incomplete/zero-sized type: {decl.name}", decl)
+        if decl.init and (decl.ctype.is_array or decl.ctype.base == "struct"):
+            raise CodeGenError("Aggregate initializers are not supported yet", decl)
+
+        asm_name = (self._qualified_name(decl.name)
+                    if self.relocatable and decl.ctype.is_static else decl.name)
         sym = Symbol(
             name=decl.name,
             ctype=decl.ctype,
             is_global=True,
             is_zeropage=decl.is_zeropage,
             fixed_addr=decl.fixed_addr,
+            is_extern=decl.ctype.is_extern,
+            asm_name=asm_name,
         )
+
+        # extern declarations consume no local resource and resolve at link time.
+        if decl.ctype.is_extern:
+            self._global_scope.define(sym)
+            return
+
+        if self.relocatable:
+            kind = "zp" if decl.is_zeropage else "ram"
+            placeholder = f"__{kind.upper()}_{self.module_name}_{decl.name}"
+            sym.fixed_addr = None
+            self.resource_requests.append({
+                "name": placeholder,
+                "symbol": asm_name,
+                "kind": kind,
+                "size": decl.ctype.size,
+                "alignment": 1,
+                "module": self.module_name,
+            })
+            self._global_scope.define(sym)
+            init_comment = ""
+            if decl.init and isinstance(decl.init, IntLiteral):
+                init_comment = f" init={decl.init.value}"
+            self._data_lines.append(
+                f"{asm_name}:   EQU     {placeholder}    ; {decl.ctype}{init_comment}"
+            )
+            return
 
         if decl.is_zeropage:
             addr = self._zp_alloc
@@ -339,82 +374,145 @@ class CodeGenerator:
         if decl.init and isinstance(decl.init, IntLiteral):
             if decl.ctype.size == 1:
                 self._data_lines.append(
-                    f"{decl.name}:   EQU     {self._hex16(addr)}    ; {decl.ctype} (init={self._hex8(decl.init.value)})"
+                    f"{asm_name}:   EQU     {self._hex16(addr)}    ; {decl.ctype} (init={self._hex8(decl.init.value)})"
                 )
             else:
                 self._data_lines.append(
-                    f"{decl.name}:   EQU     {self._hex16(addr)}    ; {decl.ctype} (init={self._hex16(decl.init.value)})"
+                    f"{asm_name}:   EQU     {self._hex16(addr)}    ; {decl.ctype} (init={self._hex16(decl.init.value)})"
                 )
         else:
             self._data_lines.append(
-                f"{decl.name}:   EQU     {self._hex16(addr)}    ; {decl.ctype}"
+                f"{asm_name}:   EQU     {self._hex16(addr)}    ; {decl.ctype}"
             )
 
     # ── Function generation ───────────────────
 
     def _register_function(self, decl: FuncDecl):
+        asm_name = (self._qualified_name(decl.name)
+                    if self.relocatable and decl.is_static else decl.name)
         sym = Symbol(
             name=decl.name,
             ctype=decl.return_type,
             is_global=True,
+            is_extern=(decl.body is None),
+            asm_name=asm_name,
         )
         self._global_scope.define(sym)
+
+    def _collect_local_decls(self, node: Optional[ASTNode]) -> List[VarDecl]:
+        """Flatten local declarations so the whole frame is reserved once."""
+        if node is None:
+            return []
+        if isinstance(node, VarDecl):
+            return [node]
+        if isinstance(node, Block):
+            out: List[VarDecl] = []
+            for child in node.statements:
+                out.extend(self._collect_local_decls(child))
+            return out
+        if isinstance(node, IfStmt):
+            return (self._collect_local_decls(node.then_body)
+                    + self._collect_local_decls(node.else_body))
+        if isinstance(node, (WhileStmt, DoWhileStmt)):
+            return self._collect_local_decls(node.body)
+        if isinstance(node, ForStmt):
+            out = self._collect_local_decls(node.init)
+            out.extend(self._collect_local_decls(node.body))
+            return out
+        return []
+
+    def _emit_function_exit(self, decl: FuncDecl):
+        if self._local_offset > 0:
+            for _ in range(self._local_offset):
+                self._emit("INS")
+            self._emit_comment(f"free {self._local_offset} byte frame")
+        if decl.is_interrupt:
+            self._emit("RTI")
+        else:
+            self._emit("PULY")
+            self._emit("RTS")
 
     def _gen_function(self, decl: FuncDecl):
         self._in_function = decl
         self._emit_blank()
         self._emit_comment(f"{'ISR' if decl.is_interrupt else 'Function'}: {decl.name}")
-        self._emit_label(decl.name)
+        func_sym = self._global_scope.lookup(decl.name)
+        self._emit_label(self._asm_symbol(func_sym) if func_sym else decl.name)
 
-        # Create new scope for function body
         func_scope = Scope(parent=self._global_scope)
         self._current_scope = func_scope
-        self._local_offset = 0
 
-        # Prologue
+        local_decls = self._collect_local_decls(decl.body)
+        seen = set()
+        frame_size = 0
+        for local in local_decls:
+            if local.name in seen:
+                raise CodeGenError(
+                    f"Duplicate/shadowed local '{local.name}' is not supported in the flat frame ABI",
+                    local,
+                )
+            seen.add(local.name)
+            if local.ctype.size <= 0:
+                raise CodeGenError(f"Local has incomplete/zero-sized type: {local.name}", local)
+            if local.init and (local.ctype.is_array or local.ctype.base == "struct"):
+                raise CodeGenError("Aggregate local initializers are not supported yet", local)
+            sym = Symbol(
+                name=local.name,
+                ctype=local.ctype,
+                is_global=False,
+                stack_offset=frame_size,
+                is_zeropage=False,
+                asm_name=local.name,
+            )
+            func_scope.define(sym)
+            frame_size += local.ctype.size
+
+        if frame_size > 240:
+            raise CodeGenError(
+                f"Function frame is {frame_size} bytes; Y-indexed frame limit is 240 bytes",
+                decl,
+            )
+        self._local_offset = frame_size
+
+        if decl.is_interrupt and decl.params:
+            raise CodeGenError("Interrupt functions cannot take C parameters", decl)
+
+        # Stable-frame ABI: Y is the frame pointer, X remains free for pointer/index work.
         if not decl.is_interrupt:
-            # Save frame: push X (old frame pointer)
-            self._emit("PSHX")
-            self._emit("TSX")            # X = SP+1 (frame pointer)
+            self._emit("PSHY")
+        for _ in range(frame_size):
+            self._emit("DES")
+        self._emit("TSY")
+        if frame_size:
+            self._emit_comment(f"reserve {frame_size} byte frame in Y")
 
-        # Allocate parameter symbols
-        # After PSHX + TSX, stack looks like:
-        #   [X+0] = saved XH
-        #   [X+1] = saved XL
-        #   [X+2] = return addr H
-        #   [X+3] = return addr L
-        #   [X+4] = first param (or first param high byte)
-        param_offset = 4  # past saved X (2) + return addr (2)
+        param_offset = frame_size + 4  # saved Y (2) + return address (2)
         for param in decl.params:
+            if param_offset + max(1, param.ctype.size) > 255:
+                raise CodeGenError("Parameter frame offset exceeds 8-bit indexed range", param)
             sym = Symbol(
                 name=param.name,
                 ctype=param.ctype,
                 is_global=False,
                 stack_offset=param_offset,
                 is_param=True,
+                asm_name=param.name,
             )
             func_scope.define(sym)
             param_offset += param.ctype.size
 
-        # Generate body
         if decl.body:
             for stmt in decl.body.statements:
                 self._gen_statement(stmt)
 
-        # Epilogue
         if decl.is_interrupt:
-            self._emit("RTI")
-        else:
-            # Default return (if no explicit return was generated)
             if not (decl.body and decl.body.statements and
                     isinstance(decl.body.statements[-1], ReturnStmt)):
-                if self._local_offset > 0:
-                    # Deallocate locals (HC11 has no LEAS — use INS loop)
-                    for _ in range(self._local_offset):
-                        self._emit("INS")
-                    self._emit_comment(f"free {self._local_offset} bytes locals")
-                self._emit("PULX")       # restore old frame pointer
-                self._emit("RTS")
+                self._emit_function_exit(decl)
+        else:
+            if not (decl.body and decl.body.statements and
+                    isinstance(decl.body.statements[-1], ReturnStmt)):
+                self._emit_function_exit(decl)
 
         self._in_function = None
         self._current_scope = self._global_scope
@@ -449,59 +547,25 @@ class CodeGenerator:
             self._emit_comment(f"TODO: unhandled statement type {type(stmt).__name__}")
 
     def _gen_local_var(self, decl: VarDecl):
-        """Allocate a local variable on the stack."""
-        size = decl.ctype.size
-        self._local_offset += size
-
-        sym = Symbol(
-            name=decl.name,
-            ctype=decl.ctype,
-            is_global=False,
-            # TSX puts SP+1 in X. After pushing N bytes of locals,
-            # the first local is at X+0, second at X+size_of_first, etc.
-            # But we need to allocate stack space first.
-            stack_offset=0,  # will calculate below
-            is_zeropage=decl.is_zeropage,
+        """Emit only the initializer; storage was reserved in the function prologue."""
+        sym = self._current_scope.lookup(decl.name)
+        if sym is None or sym.is_global:
+            raise CodeGenError(f"Missing frame slot for local: {decl.name}", decl)
+        self._emit_comment(
+            f"local Y+{sym.stack_offset}: {decl.ctype} {decl.name}"
         )
-
-        # Allocate stack space
-        if size == 1:
-            self._emit(f"DES")           # SP -= 1
-            self._emit_comment(f"local: {decl.ctype} {decl.name}")
-        else:
-            for _ in range(size):
-                self._emit("DES")
-            self._emit_comment(f"local: {decl.ctype} {decl.name}")
-
-        # After DES, TSX gives X = SP+1, and the new variable is at X+0
-        # But if we had previous locals, we need to account for them
-        # The offset from current X depends on how many locals we've declared
-        # For simplicity: re-TSX after each local allocation
-        sym.stack_offset = 0  # Will be at top of stack after TSX
-
-        self._current_scope.define(sym)
-
-        # Initialize if there's an initializer
         if decl.init:
             self._gen_expr(decl.init)
-            self._emit("TSX")
-            if decl.ctype.size == 1:
-                self._emit(f"STAA    0,X     ; store {decl.name}")
-            else:
-                self._emit(f"STD     0,X     ; store {decl.name}")
+            self._gen_identifier_store(Identifier(name=decl.name, line=decl.line, col=decl.col),
+                                       decl.ctype)
 
     def _gen_return(self, stmt: ReturnStmt):
-        """Generate return statement."""
+        """Generate return using the stable Y-frame ABI."""
         if stmt.value:
             self._gen_expr(stmt.value)
-            # Result already in A (8-bit) or D (16-bit)
-
-        if self._local_offset > 0:
-            # Deallocate locals by adjusting SP
-            for _ in range(self._local_offset):
-                self._emit("INS")
-        self._emit("PULX")       # restore old frame pointer
-        self._emit("RTS")
+        if self._in_function is None:
+            raise CodeGenError("return outside function", stmt)
+        self._emit_function_exit(self._in_function)
 
     def _gen_if(self, stmt: IfStmt):
         """Generate if/else statement."""
