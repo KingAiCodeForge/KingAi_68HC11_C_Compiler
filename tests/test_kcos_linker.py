@@ -4,6 +4,7 @@ import pytest
 
 from hc11_compiler import (
     ResourceMap,
+    compile_asm_object,
     compile_object,
     compile_source,
     link_objects,
@@ -285,3 +286,59 @@ def test_overlapping_logical_pools_still_collision_check_physically():
     second = rmap.allocate("ram", 8, 1, "normal", "b")
     assert first.start == 0x0040
     assert second.start >= 0x0048
+
+
+def test_relocatable_assembly_object_strips_zero_org_and_namespaces_locals():
+    source = r"""
+        ORG $0000
+policy:
+        LDAA #$01
+        BEQ done
+        INCA
+done:
+        RTS
+"""
+    obj = compile_asm_object(
+        source,
+        module_name="kcos_policy",
+        target="vy_v6",
+        exports=["policy:function"],
+    )
+    assert "ORG" not in obj.assembly
+    assert "policy:" in obj.assembly
+    assert "__kcos_policy_done:" in obj.assembly
+    assert "BEQ __kcos_policy_done" in obj.assembly
+    assert [(x.name, x.kind) for x in obj.exports] == [("policy", "function")]
+    image = link_objects([obj])
+    assert "policy" in image.symbols
+    assert "__kcos_policy_done" in image.symbols
+    assert image.size > 0
+
+
+def test_relocatable_assembly_rejects_absolute_org():
+    source = "ORG $9000\nentry:\n RTS\n"
+    with pytest.raises(Exception, match="not relocatable"):
+        compile_asm_object(
+            source,
+            module_name="bad",
+            target="vy_v6",
+            exports=["entry"],
+        )
+
+
+def test_two_assembly_objects_can_reuse_internal_label_names():
+    one = compile_asm_object(
+        "ORG 0\none:\n BRA done\ndone:\n RTS\n",
+        module_name="one",
+        target="vy_v6",
+        exports=["one"],
+    )
+    two = compile_asm_object(
+        "ORG 0\ntwo:\n BRA done\ndone:\n RTS\n",
+        module_name="two",
+        target="vy_v6",
+        exports=["two"],
+    )
+    image = link_objects([one, two])
+    assert "__one_done" in image.symbols
+    assert "__two_done" in image.symbols
