@@ -93,6 +93,16 @@ class RelocatableObject:
     def loads(cls, text: str) -> "RelocatableObject":
         return cls.from_dict(json.loads(text))
 
+    def save(self, path: str):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.dumps())
+            f.write("\n")
+
+    @classmethod
+    def load(cls, path: str) -> "RelocatableObject":
+        with open(path, "r", encoding="utf-8") as f:
+            return cls.loads(f.read())
+
 
 def _walk_ast(node):
     if isinstance(node, ASTNode):
