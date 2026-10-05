@@ -1475,71 +1475,15 @@ class CodeGenerator:
         return result_type
 
     def _gen_assignment(self, asgn: Assignment) -> CType:
-        """Generate simple assignment."""
-        # Evaluate RHS
+        """Generate scalar assignment through the common lvalue path."""
         rtype = self._gen_expr(asgn.value)
-
-        # Store to LHS
         if isinstance(asgn.target, Identifier):
+            dst = self._infer_expr_type(asgn.target)
             self._gen_identifier_store(asgn.target, rtype)
-        elif isinstance(asgn.target, Deref):
-            # *ptr = value  ->  store through pointer
-            # Check for constant address (volatile I/O): *(type*)0x1030 = val
-            const_addr = self._try_get_const_ptr_addr(asgn.target.expr)
-            if const_addr is not None:
-                addr, pointed = const_addr
-                addr_str = self._hex16(addr) if addr > 0xFF else self._hex8(addr)
-                if pointed.size == 1:
-                    self._emit(f"STAA    {addr_str}  ; *({self._hex16(addr)}) = A direct")
-                else:
-                    self._emit(f"STD     {addr_str}  ; *({self._hex16(addr)}) = D direct")
-            else:
-                # General path: evaluate pointer, store through X
-                val_size = rtype.size
-                if val_size == 1:
-                    self._emit("PSHA")         # save 8-bit value
-                else:
-                    self._emit("PSHB")         # save 16-bit value (D = A:B)
-                    self._emit("PSHA")
-                ptr_type = self._gen_expr(asgn.target.expr)  # pointer addr -> D (16-bit)
-                self._emit("XGDX")         # X = pointer address
-                if val_size == 1:
-                    self._emit("PULA")         # A = value to store
-                    self._emit("STAA    0,X")  # *ptr = A (byte)
-                else:
-                    self._emit("PULA")         # restore D (A first, then B)
-                    self._emit("PULB")
-                    self._emit("STD     0,X")  # *ptr = D (word)
-        elif isinstance(asgn.target, ArraySubscript):
-            # array[index] = value
-            val_size = rtype.size
-            if val_size == 1:
-                self._emit("PSHA")         # save value (8-bit)
-            else:
-                self._emit("PSHB")
-                self._emit("PSHA")         # save value (16-bit D)
-            # Calculate address: base pointer + index
-            self._gen_expr(asgn.target.array)  # base addr -> D
-            self._emit("PSHB")
-            self._emit("PSHA")            # save base addr
-            self._gen_expr(asgn.target.index)  # index -> A
-            self._emit("TAB")             # B = index
-            self._emit("PULA")            # restore base addr into D
-            self._emit("PULB")            # (PULA gets A=high, but we need to
-            #                               add index to low byte — use ABX)
-            self._emit("XGDX")            # X = base address
-            self._emit("ABX")             # X = X + B (base + index)
-            if val_size == 1:
-                self._emit("PULA")         # A = value
-                self._emit("STAA    0,X")
-            else:
-                self._emit("PULA")
-                self._emit("PULB")
-                self._emit("STD     0,X")
-        else:
-            self._emit_comment(f"TODO: assignment to {type(asgn.target).__name__}")
-
-        return rtype
+            return dst
+        if isinstance(asgn.target, (Deref, ArraySubscript, MemberAccess)):
+            return self._store_lvalue(asgn.target, rtype)
+        raise CodeGenError(f"Unsupported assignment target: {type(asgn.target).__name__}", asgn)
 
     def _gen_compound_assignment(self, asgn: CompoundAssignment) -> CType:
         """Generate compound assignment (+=, -=, |=, &=, etc.)."""
@@ -1599,8 +1543,7 @@ class CodeGenerator:
             return CType("int")
 
     def _gen_func_call(self, call: FuncCall) -> CType:
-        """Generate function call."""
-        # Push arguments right-to-left
+        """Generate function call with right-to-left stack arguments."""
         total_arg_size = 0
         for arg in reversed(call.args):
             arg_type = self._gen_expr(arg)
@@ -1612,19 +1555,16 @@ class CodeGenerator:
                 self._emit("PSHA")
                 total_arg_size += 2
 
-        self._emit(f"JSR     {call.name}")
+        sym = self._global_scope.lookup(call.name)
+        call_name = self._asm_symbol(sym) if sym else call.name
+        self._emit(f"JSR     {call_name}")
 
-        # Cleanup arguments from stack
         if total_arg_size > 0:
             for _ in range(total_arg_size):
                 self._emit("INS")
             self._emit_comment(f"clean {total_arg_size} bytes args")
 
-        # Return value is in A (8-bit) or D (16-bit)
-        sym = self._global_scope.lookup(call.name)
-        if sym:
-            return sym.ctype
-        return CType("int")
+        return sym.ctype if sym else CType("int")
 
     def _try_get_const_ptr_addr(self, expr) -> Optional[Tuple[int, CType]]:
         """Check if an expression is a constant pointer (cast of int literal).
@@ -1644,60 +1584,14 @@ class CodeGenerator:
         return None
 
     def _gen_deref(self, deref: Deref) -> CType:
-        """Generate pointer dereference: *ptr.
-
-        Optimized path for constant addresses (memory-mapped I/O):
-          *(volatile unsigned char *)0x1030  →  LDAA $1030  (direct)
-
-        General path: load pointer into D, XGDX, indexed load.
-        """
-        # Check for constant pointer address (volatile I/O optimization)
-        const_addr = self._try_get_const_ptr_addr(deref.expr)
-        if const_addr is not None:
-            addr, pointed = const_addr
-            addr_str = self._hex16(addr) if addr > 0xFF else self._hex8(addr)
-            if pointed.size == 1:
-                self._emit(f"LDAA    {addr_str}  ; *({self._hex16(addr)}) direct")
-            else:
-                self._emit(f"LDD     {addr_str}  ; *({self._hex16(addr)}) direct")
-            return pointed
-
-        # General path: evaluate pointer expression
-        ptr_type = self._gen_expr(deref.expr)
-
-        # Pointer value should be in D (16-bit address)
-        # Move to X for indexed load
-        self._emit("XGDX")            # X = D (pointer value)
-        if ptr_type.is_pointer:
-            pointed = ptr_type.pointed_to()
-            if pointed.size == 1:
-                self._emit("LDAA    0,X     ; *ptr (byte)")
-            else:
-                self._emit("LDD     0,X     ; *ptr (word)")
-            return pointed
-        else:
-            # Assume byte dereference
-            self._emit("LDAA    0,X     ; *ptr")
-            return CType("char", is_unsigned=True)
+        """Generate pointer dereference using the common typed lvalue path."""
+        return self._load_lvalue(deref)
 
     def _gen_addr_of(self, addr: AddrOf) -> CType:
-        """Generate address-of: &var."""
-        if isinstance(addr.expr, Identifier):
-            sym = self._current_scope.lookup(addr.expr.name)
-            if sym is None:
-                raise CodeGenError(f"Undefined variable: {addr.expr.name}", addr)
-            if sym.is_global and sym.fixed_addr is not None:
-                self._emit(f"LDD     {self._imm16(sym.fixed_addr)}  ; &{sym.name}")
-            else:
-                # Local: compute address from stack frame
-                self._emit("TSX")
-                self._emit(f"XGDX")   # D = frame pointer
-                if sym.stack_offset > 0:
-                    self._emit(f"ADDD    {self._imm16(sym.stack_offset)}")
-            return sym.ctype.pointer_to()
-        else:
-            self._emit_comment("TODO: address-of complex expr")
-            return CType("void", pointer_depth=1)
+        """Generate address-of for any supported lvalue."""
+        ctype = self._gen_lvalue_address(addr.expr)
+        self._emit("XGDX")
+        return ctype.pointer_to()
 
     def _gen_cast(self, cast: Cast) -> CType:
         """Generate type cast."""
@@ -1773,20 +1667,12 @@ class CodeGenerator:
         return CType("int")
 
     def _gen_array_subscript(self, sub: ArraySubscript) -> CType:
-        """Generate array[index] read."""
-        # Load base address
-        self._gen_expr(sub.array)
-        self._emit("PSHA")
-        # Load index
-        self._gen_expr(sub.index)
-        self._emit("TAB")             # B = index
-        self._emit("PULA")            # A = base
-        self._emit("ABA")             # A = base + index
-        self._emit("TAB")
-        self._emit("CLRA")
-        self._emit("XGDX")            # X = address
-        self._emit("LDAA    0,X")     # load byte at address
-        return CType("char", is_unsigned=True)
+        """Generate typed array/pointer subscript read."""
+        return self._load_lvalue(sub)
+
+    def _gen_member_access(self, member: MemberAccess) -> CType:
+        """Generate typed struct member read."""
+        return self._load_lvalue(member)
 
     def _gen_ternary(self, op: TernaryOp) -> CType:
         """Generate ternary: cond ? a : b."""
@@ -1807,15 +1693,18 @@ class CodeGenerator:
         return CType("int")
 
     def _gen_sizeof(self, expr: SizeofExpr) -> CType:
-        """Generate sizeof — resolved at compile time."""
+        """Generate sizeof resolved entirely at compile time."""
         if expr.target_type:
             size = expr.target_type.size
+        elif expr.target_expr is not None:
+            size = self._infer_expr_type(expr.target_expr).size
         else:
-            size = 2  # default assumption
-        self._emit(f"LDAA    {self._imm8(size)}  ; sizeof")
+            size = 0
+        if size <= 0xFF:
+            self._emit(f"LDAA    {self._imm8(size)}  ; sizeof")
+            return CType("char", is_unsigned=True)
+        self._emit(f"LDD     {self._imm16(size)}  ; sizeof")
         return CType("int", is_unsigned=True)
-
-    # ── String data generation ────────────────
 
     def _gen_string_data(self):
         """Emit string literal data at end of code section."""
