@@ -1221,7 +1221,7 @@ class CodeGenerator:
                 return result_type
 
             else:
-                    raise CodeGenError(f"Unsupported 16-bit binary operator: {op.op}", op)
+                raise CodeGenError(f"Unsupported 16-bit binary operator: {op.op}", op)
 
             return result_type
 
