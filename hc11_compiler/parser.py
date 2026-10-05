@@ -17,7 +17,7 @@ Supports a practical subset of C suitable for embedded 68HC11 programming:
 """
 
 from __future__ import annotations
-from typing import List, Optional
+from typing import Dict, List, Optional
 from .lexer import Token, TokenType
 from .ast_nodes import *
 
@@ -55,6 +55,7 @@ class Parser:
         self.tokens = tokens
         self.source = source
         self.pos = 0
+        self.structs: Dict[str, StructDecl] = {}
 
     # ── Helpers ─────────────────────────────
 
@@ -91,24 +92,27 @@ class Parser:
     # ── Type parsing ──────────────────────────
 
     def _is_type_start(self) -> bool:
-        """Check if current token starts a type specifier."""
+        """Check if current token starts a type specifier/storage qualifier."""
         return self._at(
             TokenType.KW_VOID, TokenType.KW_CHAR, TokenType.KW_INT,
             TokenType.KW_UNSIGNED, TokenType.KW_SIGNED,
             TokenType.KW_VOLATILE, TokenType.KW_CONST,
-            TokenType.KW_STATIC, TokenType.KW_STRUCT,
+            TokenType.KW_STATIC, TokenType.KW_EXTERN, TokenType.KW_STRUCT,
         )
 
     def _parse_type(self) -> CType:
-        """Parse a C type specifier, including qualifiers and pointer stars."""
+        """Parse a C type specifier, storage qualifiers, and pointer stars."""
         is_unsigned = False
         is_signed = False
         is_volatile = False
         is_const = False
         is_static = False
+        is_extern = False
         base = None
+        struct_name = None
+        struct_size = 0
 
-        # Collect qualifiers and type keywords in any order
+        # Collect qualifiers and the base type in source order.
         while True:
             if self._match(TokenType.KW_UNSIGNED):
                 is_unsigned = True
@@ -120,26 +124,36 @@ class Parser:
                 is_const = True
             elif self._match(TokenType.KW_STATIC):
                 is_static = True
+            elif self._match(TokenType.KW_EXTERN):
+                is_extern = True
             elif self._match(TokenType.KW_VOID):
                 base = "void"
             elif self._match(TokenType.KW_CHAR):
                 base = "char"
             elif self._match(TokenType.KW_INT):
                 base = "int"
+            elif self._match(TokenType.KW_STRUCT):
+                name_tok = self._expect(TokenType.IDENT, "Expected struct tag")
+                base = "struct"
+                struct_name = name_tok.value
+                known = self.structs.get(struct_name)
+                struct_size = known.size if known is not None else 0
             else:
                 break
 
-        # If only unsigned/signed given with no base, default to int
+        # If only unsigned/signed given with no base, default to int.
         if base is None:
             if is_unsigned or is_signed:
                 base = "int"
             else:
                 raise ParseError("Expected type specifier", self._cur())
 
-        # Count pointer stars
         pointer_depth = 0
         while self._match(TokenType.STAR):
             pointer_depth += 1
+
+        if base == "struct" and pointer_depth == 0 and struct_size <= 0:
+            raise ParseError(f"Incomplete struct type: {struct_name}", self._cur())
 
         return CType(
             base=base,
@@ -147,8 +161,55 @@ class Parser:
             is_volatile=is_volatile,
             is_const=is_const,
             is_static=is_static,
+            is_extern=is_extern,
             pointer_depth=pointer_depth,
+            struct_name=struct_name,
+            struct_size=struct_size,
         )
+
+    def _parse_array_suffix(self, ctype: CType) -> CType:
+        """Parse one fixed-size array declarator and attach it to the type."""
+        if not self._match(TokenType.LBRACKET):
+            return ctype
+        n_tok = self._expect(TokenType.INT_LITERAL, "Expected constant array length")
+        n = int(n_tok.value)
+        if n <= 0:
+            raise ParseError("Array length must be greater than zero", n_tok)
+        self._expect(TokenType.RBRACKET, "Expected ']' after array length")
+        if self._at(TokenType.LBRACKET):
+            raise ParseError("Multi-dimensional arrays are not supported yet", self._cur())
+        ctype.array_len = n
+        return ctype
+
+    def _parse_struct_decl(self) -> StructDecl:
+        """Parse a named, packed struct definition or forward declaration."""
+        tok = self._expect(TokenType.KW_STRUCT)
+        name_tok = self._expect(TokenType.IDENT, "Expected struct tag")
+        name = name_tok.value
+
+        if self._match(TokenType.SEMI):
+            decl = self.structs.get(name) or StructDecl(name=name, fields=[], size=0,
+                                                        line=tok.line, col=tok.col)
+            self.structs[name] = decl
+            return decl
+
+        self._expect(TokenType.LBRACE, "Expected '{' in struct definition")
+        fields: List[StructField] = []
+        offset = 0
+        while not self._at(TokenType.RBRACE, TokenType.EOF):
+            ftype = self._parse_type()
+            field_tok = self._expect(TokenType.IDENT, "Expected struct field name")
+            ftype = self._parse_array_suffix(ftype)
+            self._expect(TokenType.SEMI, "Expected ';' after struct field")
+            fields.append(StructField(name=field_tok.value, ctype=ftype, offset=offset,
+                                      line=field_tok.line, col=field_tok.col))
+            offset += ftype.size
+
+        self._expect(TokenType.RBRACE, "Expected '}' after struct fields")
+        self._expect(TokenType.SEMI, "Expected ';' after struct definition")
+        decl = StructDecl(name=name, fields=fields, size=offset, line=tok.line, col=tok.col)
+        self.structs[name] = decl
+        return decl
 
     # ── Top-level parsing ─────────────────────
 
@@ -169,6 +230,12 @@ class Parser:
         # Handle typedef
         if self._at(TokenType.KW_TYPEDEF):
             return self._parse_typedef()
+
+        # Named struct definition / forward declaration.
+        if (self._at(TokenType.KW_STRUCT)
+                and self._peek(1).type == TokenType.IDENT
+                and self._peek(2).type in (TokenType.LBRACE, TokenType.SEMI)):
+            return self._parse_struct_decl()
 
         # Check for __interrupt keyword before type
         is_interrupt = False
@@ -234,6 +301,19 @@ class Parser:
         params = self._parse_param_list()
         self._expect(TokenType.RPAREN)
 
+        # Prototype / extern declaration.
+        if self._match(TokenType.SEMI):
+            return FuncDecl(
+                name=name,
+                return_type=return_type,
+                params=params,
+                body=None,
+                is_interrupt=is_interrupt,
+                is_static=return_type.is_static,
+                line=name_tok.line,
+                col=name_tok.col,
+            )
+
         body = self._parse_block()
 
         return FuncDecl(
@@ -261,6 +341,9 @@ class Parser:
             pname = ""
             if self._at(TokenType.IDENT):
                 pname = self._advance().value
+                ptype = self._parse_array_suffix(ptype)
+                if ptype.is_array:
+                    ptype = ptype.element_type().pointer_to()
             params.append(FuncParam(name=pname, ctype=ptype,
                                     line=self._cur().line, col=self._cur().col))
             if not self._match(TokenType.COMMA):
@@ -270,6 +353,7 @@ class Parser:
     def _parse_global_var_decl(self, name: str, ctype: CType,
                                is_zeropage: bool, name_tok: Token) -> VarDecl:
         """Parse global variable declaration."""
+        ctype = self._parse_array_suffix(ctype)
         init = None
         if self._match(TokenType.ASSIGN):
             init = self._parse_expr()
@@ -451,6 +535,7 @@ class Parser:
             is_zeropage = True
 
         name_tok = self._expect(TokenType.IDENT, "Expected variable name")
+        ctype = self._parse_array_suffix(ctype)
         init = None
         if self._match(TokenType.ASSIGN):
             init = self._parse_expr()
