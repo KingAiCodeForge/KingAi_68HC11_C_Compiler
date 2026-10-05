@@ -34,7 +34,7 @@ from .codegen import CodeGenerator
 from .assembler import Assembler, AssemblerError, assemble, assemble_to_s19
 from .objectfile import (
     KCOS_ABI, OBJECT_MAGIC, OBJECT_VERSION, ObjectFormatError,
-    ObjectSymbol, RelocatableObject, compile_kcos_module, compile_object,
+    ObjectSymbol, RelocatableObject, compile_asm_object, compile_kcos_module, compile_object,
 )
 from .resource_map import (
     Allocation, MemoryRegion, ResourceCollisionError, ResourceMap, ResourceMapError,
