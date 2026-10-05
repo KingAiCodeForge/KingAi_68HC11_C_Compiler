@@ -721,6 +721,8 @@ class CodeGenerator:
             return self._gen_post_incdec(expr)
         elif isinstance(expr, ArraySubscript):
             return self._gen_array_subscript(expr)
+        elif isinstance(expr, MemberAccess):
+            return self._gen_member_access(expr)
         elif isinstance(expr, TernaryOp):
             return self._gen_ternary(expr)
         elif isinstance(expr, SizeofExpr):
@@ -763,50 +765,269 @@ class CodeGenerator:
         self._emit(f"LDAA    {self._imm8(lit.value)}")
         return CType("char")
 
+    def _get_struct_field(self, ctype: CType, member: str,
+                              node: ASTNode) -> StructField:
+        if ctype.is_pointer:
+            ctype = ctype.pointed_to()
+        if ctype.base != "struct" or not ctype.struct_name:
+            raise CodeGenError(f"Member access requires struct type, got {ctype}", node)
+        decl = self._structs.get(ctype.struct_name)
+        if decl is None:
+            raise CodeGenError(f"Unknown struct layout: {ctype.struct_name}", node)
+        for field in decl.fields:
+            if field.name == member:
+                return field
+        raise CodeGenError(f"struct {ctype.struct_name} has no member '{member}'", node)
+
+    def _infer_expr_type(self, expr: Expression) -> CType:
+        """Infer expression type without emitting instructions."""
+        if isinstance(expr, Identifier):
+            sym = self._current_scope.lookup(expr.name)
+            if sym is None:
+                raise CodeGenError(f"Undefined variable: {expr.name}", expr)
+            return sym.ctype
+        if isinstance(expr, CharLiteral):
+            return CType("char")
+        if isinstance(expr, IntLiteral):
+            return CType("char", is_unsigned=expr.value >= 0) if -128 <= expr.value <= 255 else CType("int")
+        if isinstance(expr, Cast):
+            return expr.cast_type
+        if isinstance(expr, AddrOf):
+            return self._infer_expr_type(expr.expr).pointer_to()
+        if isinstance(expr, Deref):
+            t = self._infer_expr_type(expr.expr)
+            return t.pointed_to() if t.is_pointer else CType("char", is_unsigned=True)
+        if isinstance(expr, ArraySubscript):
+            t = self._infer_expr_type(expr.array)
+            if t.is_array:
+                return t.element_type()
+            if t.is_pointer:
+                return t.pointed_to()
+            raise CodeGenError("Subscripted expression is not an array/pointer", expr)
+        if isinstance(expr, MemberAccess):
+            obj_t = self._infer_expr_type(expr.object)
+            if expr.is_arrow:
+                if not obj_t.is_pointer:
+                    raise CodeGenError("'->' requires pointer-to-struct", expr)
+                obj_t = obj_t.pointed_to()
+            return self._get_struct_field(obj_t, expr.member, expr).ctype
+        if isinstance(expr, FuncCall):
+            sym = self._global_scope.lookup(expr.name)
+            return sym.ctype if sym else CType("int")
+        if isinstance(expr, (Assignment, CompoundAssignment)):
+            return self._infer_expr_type(expr.target)
+        if isinstance(expr, BinaryOp):
+            return self._promote_types(self._infer_expr_type(expr.left),
+                                       self._infer_expr_type(expr.right))
+        if isinstance(expr, (PreIncDec, PostIncDec)):
+            return self._infer_expr_type(expr.operand)
+        if isinstance(expr, TernaryOp):
+            return self._promote_types(self._infer_expr_type(expr.then_expr),
+                                       self._infer_expr_type(expr.else_expr))
+        return CType("int")
+
+    def _emit_add_x_const(self, value: int):
+        """Add an arbitrary non-negative constant to X using ABX chunks."""
+        remaining = int(value)
+        while remaining > 0:
+            chunk = min(remaining, 255)
+            self._emit(f"LDAB    {self._imm8(chunk)}")
+            self._emit("ABX")
+            remaining -= chunk
+
+    def _emit_scaled_index_add(self, elem_size: int):
+        """Add B * elem_size to X without assuming the result fits in 8 bits."""
+        if elem_size <= 0:
+            raise ValueError("element size must be positive")
+        if elem_size == 1:
+            self._emit("ABX")
+            return
+        loop = self._label("idx")
+        done = self._label("idx_done")
+        self._emit("TSTB")
+        self._emit(f"BEQ     {done}")
+        self._emit_label(loop)
+        for _ in range(elem_size):
+            self._emit("INX")
+        self._emit("DECB")
+        self._emit(f"BNE     {loop}")
+        self._emit_label(done)
+
+    def _gen_lvalue_address(self, expr: Expression) -> CType:
+        """Put the address of an lvalue in X and return its stored type."""
+        if isinstance(expr, Identifier):
+            sym = self._current_scope.lookup(expr.name)
+            if sym is None:
+                raise CodeGenError(f"Undefined variable: {expr.name}", expr)
+            if sym.is_global:
+                if sym.fixed_addr is not None:
+                    self._emit(f"LDX     {self._imm16(sym.fixed_addr)}")
+                else:
+                    self._emit(f"LDX     #{self._asm_symbol(sym)}")
+            else:
+                # Copy stable frame pointer Y -> X without changing Y or net SP.
+                self._emit("PSHY")
+                self._emit("PULX")
+                self._emit_add_x_const(sym.stack_offset)
+            return sym.ctype
+
+        if isinstance(expr, Deref):
+            ptr_t = self._gen_expr(expr.expr)
+            if not ptr_t.is_pointer:
+                raise CodeGenError("Cannot dereference non-pointer lvalue", expr)
+            self._emit("XGDX")
+            return ptr_t.pointed_to()
+
+        if isinstance(expr, ArraySubscript):
+            base_t = self._infer_expr_type(expr.array)
+            elem_t = base_t.element_type() if base_t.is_array else (
+                base_t.pointed_to() if base_t.is_pointer else None
+            )
+            if elem_t is None:
+                raise CodeGenError("Subscripted expression is not an array/pointer", expr)
+
+            idx_t = self._gen_expr(expr.index)
+            if idx_t.is_byte:
+                self._emit("TAB")
+            # For 16-bit indices B already holds the low byte. Fixed-size HC11
+            # arrays are intentionally limited to 255 elements in this ABI.
+            self._emit(f"STAB    {self._hex8(self._scratch_index_addr)}")
+
+            if base_t.is_array:
+                self._gen_lvalue_address(expr.array)
+            else:
+                self._gen_expr(expr.array)
+                self._emit("XGDX")
+
+            self._emit(f"LDAB    {self._hex8(self._scratch_index_addr)}")
+            self._emit_scaled_index_add(elem_t.size)
+            return elem_t
+
+        if isinstance(expr, MemberAccess):
+            obj_t = self._infer_expr_type(expr.object)
+            if expr.is_arrow:
+                if not obj_t.is_pointer:
+                    raise CodeGenError("'->' requires pointer-to-struct", expr)
+                struct_t = obj_t.pointed_to()
+                self._gen_expr(expr.object)
+                self._emit("XGDX")
+            else:
+                struct_t = obj_t
+                self._gen_lvalue_address(expr.object)
+            field = self._get_struct_field(struct_t, expr.member, expr)
+            self._emit_add_x_const(field.offset)
+            return field.ctype
+
+        raise CodeGenError(f"Expression is not an addressable lvalue: {type(expr).__name__}", expr)
+
+    def _load_lvalue(self, expr: Expression) -> CType:
+        ctype = self._gen_lvalue_address(expr)
+        if ctype.is_array:
+            # C array-to-pointer decay.
+            self._emit("XGDX")
+            return ctype.element_type().pointer_to()
+        if ctype.base == "struct" and not ctype.is_pointer:
+            raise CodeGenError("Whole-struct rvalue copies are not supported", expr)
+        if ctype.size == 1:
+            self._emit("LDAA    0,X")
+        elif ctype.size == 2:
+            self._emit("LDD     0,X")
+        else:
+            raise CodeGenError(f"Cannot scalar-load {ctype.size}-byte object", expr)
+        return ctype
+
+    def _coerce_result(self, src: CType, dst: CType):
+        """Coerce the current A/D result to the scalar destination width."""
+        if dst.size == 1 and src.size == 2:
+            self._emit("TBA")
+        elif dst.size == 2 and src.size == 1:
+            self._emit("TAB")
+            if src.is_unsigned:
+                self._emit("CLRA")
+            else:
+                self._emit("CLRA")
+                ok = self._label("sext_ok")
+                self._emit("TSTB")
+                self._emit(f"BPL     {ok}")
+                self._emit("LDAA    #$FF")
+                self._emit_label(ok)
+
+    def _store_lvalue(self, expr: Expression, src_type: CType) -> CType:
+        dst_type = self._infer_expr_type(expr)
+        if dst_type.is_array or (dst_type.base == "struct" and not dst_type.is_pointer):
+            raise CodeGenError("Aggregate assignment/copy is not supported", expr)
+        self._coerce_result(src_type, dst_type)
+
+        if dst_type.size == 1:
+            self._emit("PSHA")
+        elif dst_type.size == 2:
+            self._emit("PSHB")
+            self._emit("PSHA")
+        else:
+            raise CodeGenError(f"Cannot scalar-store {dst_type.size}-byte object", expr)
+
+        self._gen_lvalue_address(expr)
+
+        if dst_type.size == 1:
+            self._emit("PULA")
+            self._emit("STAA    0,X")
+        else:
+            self._emit("PULA")
+            self._emit("PULB")
+            self._emit("STD     0,X")
+        return dst_type
+
     def _gen_identifier_load(self, ident: Identifier) -> CType:
-        """Load a variable's value into AccA or AccD."""
+        """Load a scalar identifier or decay an array to a pointer."""
         sym = self._current_scope.lookup(ident.name)
         if sym is None:
             raise CodeGenError(f"Undefined variable: {ident.name}", ident)
 
+        if sym.ctype.is_array:
+            self._gen_lvalue_address(ident)
+            self._emit("XGDX")
+            return sym.ctype.element_type().pointer_to()
+        if sym.ctype.base == "struct" and not sym.ctype.is_pointer:
+            raise CodeGenError("Whole-struct rvalue copies are not supported", ident)
+
         if sym.is_global:
             addr = sym.fixed_addr
+            asm_name = self._asm_symbol(sym)
             if addr is not None and addr <= 0xFF:
-                # Direct page addressing (faster)
                 if sym.ctype.size == 1:
                     self._emit(f"LDAA    {self._hex8(addr)}     ; {sym.name}")
                 else:
                     self._emit(f"LDD     {self._hex8(addr)}     ; {sym.name}")
             elif addr is not None:
-                # Extended addressing
                 if sym.ctype.size == 1:
                     self._emit(f"LDAA    {self._hex16(addr)}   ; {sym.name}")
                 else:
                     self._emit(f"LDD     {self._hex16(addr)}   ; {sym.name}")
             else:
-                # Symbol name reference
                 if sym.ctype.size == 1:
-                    self._emit(f"LDAA    {sym.name}")
+                    self._emit(f"LDAA    {asm_name}")
                 else:
-                    self._emit(f"LDD     {sym.name}")
+                    self._emit(f"LDD     {asm_name}")
         else:
-            # Local variable: access via frame pointer
-            self._emit("TSX")
             if sym.ctype.size == 1:
-                self._emit(f"LDAA    {sym.stack_offset},X  ; {sym.name}")
+                self._emit(f"LDAA    {sym.stack_offset},Y  ; {sym.name}")
             else:
-                self._emit(f"LDD     {sym.stack_offset},X  ; {sym.name}")
+                self._emit(f"LDD     {sym.stack_offset},Y  ; {sym.name}")
 
         return sym.ctype
 
     def _gen_identifier_store(self, ident: Identifier, ctype: CType):
-        """Store AccA or AccD to a variable location."""
+        """Store the current scalar result to an identifier."""
         sym = self._current_scope.lookup(ident.name)
         if sym is None:
             raise CodeGenError(f"Undefined variable: {ident.name}", ident)
+        if sym.ctype.is_array or (sym.ctype.base == "struct" and not sym.ctype.is_pointer):
+            raise CodeGenError("Aggregate assignment/copy is not supported", ident)
 
+        self._coerce_result(ctype, sym.ctype)
         if sym.is_global:
             addr = sym.fixed_addr
+            asm_name = self._asm_symbol(sym)
             if addr is not None and addr <= 0xFF:
                 if sym.ctype.size == 1:
                     self._emit(f"STAA    {self._hex8(addr)}     ; {sym.name}")
@@ -819,15 +1040,14 @@ class CodeGenerator:
                     self._emit(f"STD     {self._hex16(addr)}   ; {sym.name}")
             else:
                 if sym.ctype.size == 1:
-                    self._emit(f"STAA    {sym.name}")
+                    self._emit(f"STAA    {asm_name}")
                 else:
-                    self._emit(f"STD     {sym.name}")
+                    self._emit(f"STD     {asm_name}")
         else:
-            self._emit("TSX")
             if sym.ctype.size == 1:
-                self._emit(f"STAA    {sym.stack_offset},X  ; {sym.name}")
+                self._emit(f"STAA    {sym.stack_offset},Y  ; {sym.name}")
             else:
-                self._emit(f"STD     {sym.stack_offset},X  ; {sym.name}")
+                self._emit(f"STD     {sym.stack_offset},Y  ; {sym.name}")
 
     def _gen_binary_op(self, op: BinaryOp) -> CType:
         """Generate code for a binary operation.
