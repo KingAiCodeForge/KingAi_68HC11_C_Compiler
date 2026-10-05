@@ -54,9 +54,11 @@ class Symbol:
     ctype: CType
     is_global: bool = True
     is_zeropage: bool = False
-    stack_offset: int = 0         # offset from frame pointer (X after TSX)
+    stack_offset: int = 0         # offset from stable Y frame pointer
     fixed_addr: Optional[int] = None
     is_param: bool = False
+    is_extern: bool = False
+    asm_name: Optional[str] = None
 
 @dataclass
 class Scope:
@@ -130,11 +132,15 @@ class CodeGenerator:
     """Generates 68HC11 assembly from AST."""
 
     def __init__(self, org: int = 0x8000, stack: int = 0x00FF,
-                 target: str = "generic"):
+                 target: str = "generic", relocatable: bool = False,
+                 module_name: Optional[str] = None):
         self.org = org
         self.stack = stack
         self.target = target
         self.profile = TARGET_PROFILES.get(target, TARGET_PROFILES["generic"])
+        self.relocatable = relocatable
+        raw_module = module_name or "module"
+        self.module_name = "".join(c if (c.isalnum() or c == "_") else "_" for c in raw_module)
 
         # Output sections (accumulated during code generation, joined at the end)
         self._header_lines: List[str] = []    # Assembly file header / ORG directive
@@ -152,7 +158,10 @@ class CodeGenerator:
         self._zp_alloc = 0x0040                   # Next free zero-page address for globals
         self._ram_alloc = 0x0100                  # Next free extended RAM address for globals
         self._scratch_addr = 0x003F               # Reserved direct-page scratch byte (never allocated)
+        self._scratch_index_addr = 0x003E         # Reserved array-index scratch byte
         self._string_literals: Dict[str, str] = {}    # label -> string data for FCC emission
+        self._structs: Dict[str, StructDecl] = {}
+        self.resource_requests: List[dict] = []
         self._isr_vectors: Dict[str, str] = {}        # vector name -> function label for vector table
         self._break_labels: List[str] = []            # Stack of break-target labels (loops)
         self._continue_labels: List[str] = []         # Stack of continue-target labels (loops)
@@ -161,7 +170,16 @@ class CodeGenerator:
 
     def _label(self, prefix: str = "L") -> str:
         self._label_counter += 1
+        if self.relocatable:
+            return f".{self.module_name}_{prefix}{self._label_counter}"
         return f".{prefix}{self._label_counter}"
+
+    @staticmethod
+    def _asm_symbol(sym: Symbol) -> str:
+        return sym.asm_name or sym.name
+
+    def _qualified_name(self, name: str) -> str:
+        return f"__{self.module_name}_{name}"
 
     # ── Output helpers ────────────────────────
 
@@ -223,16 +241,20 @@ class CodeGenerator:
         """Generate complete assembly output from a Program AST."""
         self._generate_header()
 
-        # First pass: collect global declarations
+        # First pass: collect aggregate types, then symbols.
+        for decl in program.declarations:
+            if isinstance(decl, StructDecl) and decl.size > 0:
+                self._structs[decl.name] = decl
+
         for decl in program.declarations:
             if isinstance(decl, VarDecl):
                 self._gen_global_var(decl)
             elif isinstance(decl, FuncDecl):
                 self._register_function(decl)
 
-        # Second pass: generate code for functions
+        # Second pass: generate code only for function definitions.
         for decl in program.declarations:
-            if isinstance(decl, FuncDecl):
+            if isinstance(decl, FuncDecl) and decl.body is not None:
                 self._gen_function(decl)
 
         # Generate string literal data
@@ -255,8 +277,13 @@ class CodeGenerator:
             f"; ============================================",
             f"",
             f"; -- Memory Configuration --",
-            f"        ORG     {self._hex16(self.org)}",
-            f"",
+        ]
+        if not self.relocatable:
+            self._header_lines.append(f"        ORG     {self._hex16(self.org)}")
+        else:
+            self._header_lines.append(f"; relocatable module: {self.module_name}")
+        self._header_lines.append(
+            f""
         ]
 
     def _assemble_output(self) -> str:
