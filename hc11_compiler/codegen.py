@@ -544,7 +544,7 @@ class CodeGenerator:
         elif isinstance(stmt, ContinueStmt):
             self._gen_continue(stmt)
         else:
-            self._emit_comment(f"TODO: unhandled statement type {type(stmt).__name__}")
+            raise CodeGenError(f"Unhandled statement type: {type(stmt).__name__}", stmt)
 
     def _gen_local_var(self, decl: VarDecl):
         """Emit only the initializer; storage was reserved in the function prologue."""
@@ -728,8 +728,7 @@ class CodeGenerator:
         elif isinstance(expr, SizeofExpr):
             return self._gen_sizeof(expr)
         else:
-            self._emit_comment(f"TODO: unhandled expr {type(expr).__name__}")
-            return CType("int")
+            raise CodeGenError(f"Unhandled expression type: {type(expr).__name__}", expr)
 
     def _gen_int_literal(self, lit: IntLiteral) -> CType:
         """Load an integer literal into AccA or AccD.
@@ -1222,7 +1221,7 @@ class CodeGenerator:
                 return result_type
 
             else:
-                self._emit_comment(f"TODO: 16-bit binary op {op.op}")
+                    raise CodeGenError(f"Unsupported 16-bit binary operator: {op.op}", op)
 
             return result_type
 
@@ -1307,7 +1306,7 @@ class CodeGenerator:
             self._emit("IDIV")         # X = quotient, D = remainder
             self._emit("TBA")          # A = low byte of remainder
         else:
-            self._emit_comment(f"TODO: binary op {op.op}")
+            raise CodeGenError(f"Unsupported 8-bit binary operator: {op.op}", op)
 
         return result_type
 
@@ -1470,7 +1469,7 @@ class CodeGenerator:
             self._emit_label(lbl_end)
             return CType("char", is_unsigned=True)
         else:
-            self._emit_comment(f"TODO: unary op {op.op}")
+            raise CodeGenError(f"Unsupported unary operator: {op.op}", op)
 
         return result_type
 
@@ -1533,14 +1532,13 @@ class CodeGenerator:
                 self._emit(f"BRA     {lbl}")
                 self._emit_label(lbl_e)
             else:
-                self._emit_comment(f"TODO: compound op {asgn.op}")
+                raise CodeGenError(f"Unsupported compound assignment operator: {asgn.op}", asgn)
 
             # Store result back
             self._gen_identifier_store(asgn.target, ltype)
             return ltype
         else:
-            self._emit_comment(f"TODO: compound assign to {type(asgn.target).__name__}")
-            return CType("int")
+            raise CodeGenError(f"Unsupported compound assignment target: {type(asgn.target).__name__}", asgn)
 
     def _gen_func_call(self, call: FuncCall) -> CType:
         """Generate function call with right-to-left stack arguments."""
@@ -1637,8 +1635,7 @@ class CodeGenerator:
                     self._emit("DECA")
             self._gen_identifier_store(op.operand, ctype)
             return ctype
-        self._emit_comment(f"TODO: pre-{op.op} on complex expr")
-        return CType("int")
+        raise CodeGenError(f"Unsupported pre-{op.op} target: {type(op.operand).__name__}", op)
 
     def _gen_post_incdec(self, op: PostIncDec) -> CType:
         """Generate x++ or x-- (width-aware)."""
@@ -1663,8 +1660,7 @@ class CodeGenerator:
                 self._gen_identifier_store(op.operand, ctype)
                 self._emit("PULA")     # return original
             return ctype
-        self._emit_comment(f"TODO: post-{op.op} on complex expr")
-        return CType("int")
+        raise CodeGenError(f"Unsupported post-{op.op} target: {type(op.operand).__name__}", op)
 
     def _gen_array_subscript(self, sub: ArraySubscript) -> CType:
         """Generate typed array/pointer subscript read."""
