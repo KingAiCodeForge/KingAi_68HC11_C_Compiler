@@ -6,15 +6,15 @@ Translates the AST into Motorola 68HC11 assembly language.
 Register usage convention:
   - AccA / AccB (8-bit): primary working registers
   - AccD (A:B combined, 16-bit): 16-bit arithmetic
-  - X: index register, used for stack-frame access (via TSX) and pointers
-  - Y: secondary index register, used for second pointer operand
+  - X: transient address/index register for pointers, arrays and member lvalues
+  - Y: stable function frame pointer (callee-saved for normal C functions)
   - SP: stack pointer (grows downward)
 
 Function calling convention:
   - Arguments pushed right-to-left on stack
   - Return value in AccA (8-bit) or AccD (16-bit)
   - Caller cleans up arguments after call
-  - Callee saves/restores X and Y if used
+  - Callee preserves Y; X is caller-clobbered scratch
   - ISRs save all registers automatically (RTI restores them)
 
 Memory layout:
@@ -54,9 +54,11 @@ class Symbol:
     ctype: CType
     is_global: bool = True
     is_zeropage: bool = False
-    stack_offset: int = 0         # offset from frame pointer (X after TSX)
+    stack_offset: int = 0         # offset from stable Y frame pointer
     fixed_addr: Optional[int] = None
     is_param: bool = False
+    is_extern: bool = False
+    asm_name: Optional[str] = None
 
 @dataclass
 class Scope:
@@ -130,11 +132,15 @@ class CodeGenerator:
     """Generates 68HC11 assembly from AST."""
 
     def __init__(self, org: int = 0x8000, stack: int = 0x00FF,
-                 target: str = "generic"):
+                 target: str = "generic", relocatable: bool = False,
+                 module_name: Optional[str] = None):
         self.org = org
         self.stack = stack
         self.target = target
         self.profile = TARGET_PROFILES.get(target, TARGET_PROFILES["generic"])
+        self.relocatable = relocatable
+        raw_module = module_name or "module"
+        self.module_name = "".join(c if (c.isalnum() or c == "_") else "_" for c in raw_module)
 
         # Output sections (accumulated during code generation, joined at the end)
         self._header_lines: List[str] = []    # Assembly file header / ORG directive
@@ -152,7 +158,10 @@ class CodeGenerator:
         self._zp_alloc = 0x0040                   # Next free zero-page address for globals
         self._ram_alloc = 0x0100                  # Next free extended RAM address for globals
         self._scratch_addr = 0x003F               # Reserved direct-page scratch byte (never allocated)
+        self._scratch_index_addr = 0x003D         # Reserved array-index scratch byte
         self._string_literals: Dict[str, str] = {}    # label -> string data for FCC emission
+        self._structs: Dict[str, StructDecl] = {}
+        self.resource_requests: List[dict] = []
         self._isr_vectors: Dict[str, str] = {}        # vector name -> function label for vector table
         self._break_labels: List[str] = []            # Stack of break-target labels (loops)
         self._continue_labels: List[str] = []         # Stack of continue-target labels (loops)
@@ -161,7 +170,16 @@ class CodeGenerator:
 
     def _label(self, prefix: str = "L") -> str:
         self._label_counter += 1
+        if self.relocatable:
+            return f".{self.module_name}_{prefix}{self._label_counter}"
         return f".{prefix}{self._label_counter}"
+
+    @staticmethod
+    def _asm_symbol(sym: Symbol) -> str:
+        return sym.asm_name or sym.name
+
+    def _qualified_name(self, name: str) -> str:
+        return f"__{self.module_name}_{name}"
 
     # ── Output helpers ────────────────────────
 
@@ -223,16 +241,20 @@ class CodeGenerator:
         """Generate complete assembly output from a Program AST."""
         self._generate_header()
 
-        # First pass: collect global declarations
+        # First pass: collect aggregate types, then symbols.
+        for decl in program.declarations:
+            if isinstance(decl, StructDecl) and decl.size > 0:
+                self._structs[decl.name] = decl
+
         for decl in program.declarations:
             if isinstance(decl, VarDecl):
                 self._gen_global_var(decl)
             elif isinstance(decl, FuncDecl):
                 self._register_function(decl)
 
-        # Second pass: generate code for functions
+        # Second pass: generate code only for function definitions.
         for decl in program.declarations:
-            if isinstance(decl, FuncDecl):
+            if isinstance(decl, FuncDecl) and decl.body is not None:
                 self._gen_function(decl)
 
         # Generate string literal data
@@ -255,8 +277,13 @@ class CodeGenerator:
             f"; ============================================",
             f"",
             f"; -- Memory Configuration --",
-            f"        ORG     {self._hex16(self.org)}",
-            f"",
+        ]
+        if not self.relocatable:
+            self._header_lines.append(f"        ORG     {self._hex16(self.org)}")
+        else:
+            self._header_lines.append(f"; relocatable module: {self.module_name}")
+        self._header_lines.append(
+            f""
         ]
 
     def _assemble_output(self) -> str:
@@ -288,13 +315,48 @@ class CodeGenerator:
     # ── Global variable generation ────────────
 
     def _gen_global_var(self, decl: VarDecl):
+        if decl.ctype.size <= 0 and not decl.ctype.is_extern:
+            raise CodeGenError(f"Variable has incomplete/zero-sized type: {decl.name}", decl)
+        if decl.init and (decl.ctype.is_array or decl.ctype.base == "struct"):
+            raise CodeGenError("Aggregate initializers are not supported yet", decl)
+
+        asm_name = (self._qualified_name(decl.name)
+                    if self.relocatable and decl.ctype.is_static else decl.name)
         sym = Symbol(
             name=decl.name,
             ctype=decl.ctype,
             is_global=True,
             is_zeropage=decl.is_zeropage,
             fixed_addr=decl.fixed_addr,
+            is_extern=decl.ctype.is_extern,
+            asm_name=asm_name,
         )
+
+        # extern declarations consume no local resource and resolve at link time.
+        if decl.ctype.is_extern:
+            self._global_scope.define(sym)
+            return
+
+        if self.relocatable:
+            kind = "zp" if decl.is_zeropage else "ram"
+            placeholder = f"__{kind.upper()}_{self.module_name}_{decl.name}"
+            sym.fixed_addr = None
+            self.resource_requests.append({
+                "name": placeholder,
+                "symbol": asm_name,
+                "kind": kind,
+                "size": decl.ctype.size,
+                "alignment": 1,
+                "module": self.module_name,
+            })
+            self._global_scope.define(sym)
+            init_comment = ""
+            if decl.init and isinstance(decl.init, IntLiteral):
+                init_comment = f" init={decl.init.value}"
+            self._data_lines.append(
+                f"{asm_name}:   EQU     {placeholder}    ; {decl.ctype}{init_comment}"
+            )
+            return
 
         if decl.is_zeropage:
             addr = self._zp_alloc
@@ -312,82 +374,145 @@ class CodeGenerator:
         if decl.init and isinstance(decl.init, IntLiteral):
             if decl.ctype.size == 1:
                 self._data_lines.append(
-                    f"{decl.name}:   EQU     {self._hex16(addr)}    ; {decl.ctype} (init={self._hex8(decl.init.value)})"
+                    f"{asm_name}:   EQU     {self._hex16(addr)}    ; {decl.ctype} (init={self._hex8(decl.init.value)})"
                 )
             else:
                 self._data_lines.append(
-                    f"{decl.name}:   EQU     {self._hex16(addr)}    ; {decl.ctype} (init={self._hex16(decl.init.value)})"
+                    f"{asm_name}:   EQU     {self._hex16(addr)}    ; {decl.ctype} (init={self._hex16(decl.init.value)})"
                 )
         else:
             self._data_lines.append(
-                f"{decl.name}:   EQU     {self._hex16(addr)}    ; {decl.ctype}"
+                f"{asm_name}:   EQU     {self._hex16(addr)}    ; {decl.ctype}"
             )
 
     # ── Function generation ───────────────────
 
     def _register_function(self, decl: FuncDecl):
+        asm_name = (self._qualified_name(decl.name)
+                    if self.relocatable and decl.is_static else decl.name)
         sym = Symbol(
             name=decl.name,
             ctype=decl.return_type,
             is_global=True,
+            is_extern=(decl.body is None),
+            asm_name=asm_name,
         )
         self._global_scope.define(sym)
+
+    def _collect_local_decls(self, node: Optional[ASTNode]) -> List[VarDecl]:
+        """Flatten local declarations so the whole frame is reserved once."""
+        if node is None:
+            return []
+        if isinstance(node, VarDecl):
+            return [node]
+        if isinstance(node, Block):
+            out: List[VarDecl] = []
+            for child in node.statements:
+                out.extend(self._collect_local_decls(child))
+            return out
+        if isinstance(node, IfStmt):
+            return (self._collect_local_decls(node.then_body)
+                    + self._collect_local_decls(node.else_body))
+        if isinstance(node, (WhileStmt, DoWhileStmt)):
+            return self._collect_local_decls(node.body)
+        if isinstance(node, ForStmt):
+            out = self._collect_local_decls(node.init)
+            out.extend(self._collect_local_decls(node.body))
+            return out
+        return []
+
+    def _emit_function_exit(self, decl: FuncDecl):
+        if self._local_offset > 0:
+            for _ in range(self._local_offset):
+                self._emit("INS")
+            self._emit_comment(f"free {self._local_offset} byte frame")
+        if decl.is_interrupt:
+            self._emit("RTI")
+        else:
+            self._emit("PULY")
+            self._emit("RTS")
 
     def _gen_function(self, decl: FuncDecl):
         self._in_function = decl
         self._emit_blank()
         self._emit_comment(f"{'ISR' if decl.is_interrupt else 'Function'}: {decl.name}")
-        self._emit_label(decl.name)
+        func_sym = self._global_scope.lookup(decl.name)
+        self._emit_label(self._asm_symbol(func_sym) if func_sym else decl.name)
 
-        # Create new scope for function body
         func_scope = Scope(parent=self._global_scope)
         self._current_scope = func_scope
-        self._local_offset = 0
 
-        # Prologue
+        local_decls = self._collect_local_decls(decl.body)
+        seen = set()
+        frame_size = 0
+        for local in local_decls:
+            if local.name in seen:
+                raise CodeGenError(
+                    f"Duplicate/shadowed local '{local.name}' is not supported in the flat frame ABI",
+                    local,
+                )
+            seen.add(local.name)
+            if local.ctype.size <= 0:
+                raise CodeGenError(f"Local has incomplete/zero-sized type: {local.name}", local)
+            if local.init and (local.ctype.is_array or local.ctype.base == "struct"):
+                raise CodeGenError("Aggregate local initializers are not supported yet", local)
+            sym = Symbol(
+                name=local.name,
+                ctype=local.ctype,
+                is_global=False,
+                stack_offset=frame_size,
+                is_zeropage=False,
+                asm_name=local.name,
+            )
+            func_scope.define(sym)
+            frame_size += local.ctype.size
+
+        if frame_size > 240:
+            raise CodeGenError(
+                f"Function frame is {frame_size} bytes; Y-indexed frame limit is 240 bytes",
+                decl,
+            )
+        self._local_offset = frame_size
+
+        if decl.is_interrupt and decl.params:
+            raise CodeGenError("Interrupt functions cannot take C parameters", decl)
+
+        # Stable-frame ABI: Y is the frame pointer, X remains free for pointer/index work.
         if not decl.is_interrupt:
-            # Save frame: push X (old frame pointer)
-            self._emit("PSHX")
-            self._emit("TSX")            # X = SP+1 (frame pointer)
+            self._emit("PSHY")
+        for _ in range(frame_size):
+            self._emit("DES")
+        self._emit("TSY")
+        if frame_size:
+            self._emit_comment(f"reserve {frame_size} byte frame in Y")
 
-        # Allocate parameter symbols
-        # After PSHX + TSX, stack looks like:
-        #   [X+0] = saved XH
-        #   [X+1] = saved XL
-        #   [X+2] = return addr H
-        #   [X+3] = return addr L
-        #   [X+4] = first param (or first param high byte)
-        param_offset = 4  # past saved X (2) + return addr (2)
+        param_offset = frame_size + 4  # saved Y (2) + return address (2)
         for param in decl.params:
+            if param_offset + max(1, param.ctype.size) > 255:
+                raise CodeGenError("Parameter frame offset exceeds 8-bit indexed range", param)
             sym = Symbol(
                 name=param.name,
                 ctype=param.ctype,
                 is_global=False,
                 stack_offset=param_offset,
                 is_param=True,
+                asm_name=param.name,
             )
             func_scope.define(sym)
             param_offset += param.ctype.size
 
-        # Generate body
         if decl.body:
             for stmt in decl.body.statements:
                 self._gen_statement(stmt)
 
-        # Epilogue
         if decl.is_interrupt:
-            self._emit("RTI")
-        else:
-            # Default return (if no explicit return was generated)
             if not (decl.body and decl.body.statements and
                     isinstance(decl.body.statements[-1], ReturnStmt)):
-                if self._local_offset > 0:
-                    # Deallocate locals (HC11 has no LEAS — use INS loop)
-                    for _ in range(self._local_offset):
-                        self._emit("INS")
-                    self._emit_comment(f"free {self._local_offset} bytes locals")
-                self._emit("PULX")       # restore old frame pointer
-                self._emit("RTS")
+                self._emit_function_exit(decl)
+        else:
+            if not (decl.body and decl.body.statements and
+                    isinstance(decl.body.statements[-1], ReturnStmt)):
+                self._emit_function_exit(decl)
 
         self._in_function = None
         self._current_scope = self._global_scope
@@ -422,59 +547,25 @@ class CodeGenerator:
             self._emit_comment(f"TODO: unhandled statement type {type(stmt).__name__}")
 
     def _gen_local_var(self, decl: VarDecl):
-        """Allocate a local variable on the stack."""
-        size = decl.ctype.size
-        self._local_offset += size
-
-        sym = Symbol(
-            name=decl.name,
-            ctype=decl.ctype,
-            is_global=False,
-            # TSX puts SP+1 in X. After pushing N bytes of locals,
-            # the first local is at X+0, second at X+size_of_first, etc.
-            # But we need to allocate stack space first.
-            stack_offset=0,  # will calculate below
-            is_zeropage=decl.is_zeropage,
+        """Emit only the initializer; storage was reserved in the function prologue."""
+        sym = self._current_scope.lookup(decl.name)
+        if sym is None or sym.is_global:
+            raise CodeGenError(f"Missing frame slot for local: {decl.name}", decl)
+        self._emit_comment(
+            f"local Y+{sym.stack_offset}: {decl.ctype} {decl.name}"
         )
-
-        # Allocate stack space
-        if size == 1:
-            self._emit(f"DES")           # SP -= 1
-            self._emit_comment(f"local: {decl.ctype} {decl.name}")
-        else:
-            for _ in range(size):
-                self._emit("DES")
-            self._emit_comment(f"local: {decl.ctype} {decl.name}")
-
-        # After DES, TSX gives X = SP+1, and the new variable is at X+0
-        # But if we had previous locals, we need to account for them
-        # The offset from current X depends on how many locals we've declared
-        # For simplicity: re-TSX after each local allocation
-        sym.stack_offset = 0  # Will be at top of stack after TSX
-
-        self._current_scope.define(sym)
-
-        # Initialize if there's an initializer
         if decl.init:
             self._gen_expr(decl.init)
-            self._emit("TSX")
-            if decl.ctype.size == 1:
-                self._emit(f"STAA    0,X     ; store {decl.name}")
-            else:
-                self._emit(f"STD     0,X     ; store {decl.name}")
+            self._gen_identifier_store(Identifier(name=decl.name, line=decl.line, col=decl.col),
+                                       decl.ctype)
 
     def _gen_return(self, stmt: ReturnStmt):
-        """Generate return statement."""
+        """Generate return using the stable Y-frame ABI."""
         if stmt.value:
             self._gen_expr(stmt.value)
-            # Result already in A (8-bit) or D (16-bit)
-
-        if self._local_offset > 0:
-            # Deallocate locals by adjusting SP
-            for _ in range(self._local_offset):
-                self._emit("INS")
-        self._emit("PULX")       # restore old frame pointer
-        self._emit("RTS")
+        if self._in_function is None:
+            raise CodeGenError("return outside function", stmt)
+        self._emit_function_exit(self._in_function)
 
     def _gen_if(self, stmt: IfStmt):
         """Generate if/else statement."""
@@ -630,6 +721,8 @@ class CodeGenerator:
             return self._gen_post_incdec(expr)
         elif isinstance(expr, ArraySubscript):
             return self._gen_array_subscript(expr)
+        elif isinstance(expr, MemberAccess):
+            return self._gen_member_access(expr)
         elif isinstance(expr, TernaryOp):
             return self._gen_ternary(expr)
         elif isinstance(expr, SizeofExpr):
@@ -672,50 +765,269 @@ class CodeGenerator:
         self._emit(f"LDAA    {self._imm8(lit.value)}")
         return CType("char")
 
+    def _get_struct_field(self, ctype: CType, member: str,
+                              node: ASTNode) -> StructField:
+        if ctype.is_pointer:
+            ctype = ctype.pointed_to()
+        if ctype.base != "struct" or not ctype.struct_name:
+            raise CodeGenError(f"Member access requires struct type, got {ctype}", node)
+        decl = self._structs.get(ctype.struct_name)
+        if decl is None:
+            raise CodeGenError(f"Unknown struct layout: {ctype.struct_name}", node)
+        for field in decl.fields:
+            if field.name == member:
+                return field
+        raise CodeGenError(f"struct {ctype.struct_name} has no member '{member}'", node)
+
+    def _infer_expr_type(self, expr: Expression) -> CType:
+        """Infer expression type without emitting instructions."""
+        if isinstance(expr, Identifier):
+            sym = self._current_scope.lookup(expr.name)
+            if sym is None:
+                raise CodeGenError(f"Undefined variable: {expr.name}", expr)
+            return sym.ctype
+        if isinstance(expr, CharLiteral):
+            return CType("char")
+        if isinstance(expr, IntLiteral):
+            return CType("char", is_unsigned=expr.value >= 0) if -128 <= expr.value <= 255 else CType("int")
+        if isinstance(expr, Cast):
+            return expr.cast_type
+        if isinstance(expr, AddrOf):
+            return self._infer_expr_type(expr.expr).pointer_to()
+        if isinstance(expr, Deref):
+            t = self._infer_expr_type(expr.expr)
+            return t.pointed_to() if t.is_pointer else CType("char", is_unsigned=True)
+        if isinstance(expr, ArraySubscript):
+            t = self._infer_expr_type(expr.array)
+            if t.is_array:
+                return t.element_type()
+            if t.is_pointer:
+                return t.pointed_to()
+            raise CodeGenError("Subscripted expression is not an array/pointer", expr)
+        if isinstance(expr, MemberAccess):
+            obj_t = self._infer_expr_type(expr.object)
+            if expr.is_arrow:
+                if not obj_t.is_pointer:
+                    raise CodeGenError("'->' requires pointer-to-struct", expr)
+                obj_t = obj_t.pointed_to()
+            return self._get_struct_field(obj_t, expr.member, expr).ctype
+        if isinstance(expr, FuncCall):
+            sym = self._global_scope.lookup(expr.name)
+            return sym.ctype if sym else CType("int")
+        if isinstance(expr, (Assignment, CompoundAssignment)):
+            return self._infer_expr_type(expr.target)
+        if isinstance(expr, BinaryOp):
+            return self._promote_types(self._infer_expr_type(expr.left),
+                                       self._infer_expr_type(expr.right))
+        if isinstance(expr, (PreIncDec, PostIncDec)):
+            return self._infer_expr_type(expr.operand)
+        if isinstance(expr, TernaryOp):
+            return self._promote_types(self._infer_expr_type(expr.then_expr),
+                                       self._infer_expr_type(expr.else_expr))
+        return CType("int")
+
+    def _emit_add_x_const(self, value: int):
+        """Add an arbitrary non-negative constant to X using ABX chunks."""
+        remaining = int(value)
+        while remaining > 0:
+            chunk = min(remaining, 255)
+            self._emit(f"LDAB    {self._imm8(chunk)}")
+            self._emit("ABX")
+            remaining -= chunk
+
+    def _emit_scaled_index_add(self, elem_size: int):
+        """Add B * elem_size to X without assuming the result fits in 8 bits."""
+        if elem_size <= 0:
+            raise ValueError("element size must be positive")
+        if elem_size == 1:
+            self._emit("ABX")
+            return
+        loop = self._label("idx")
+        done = self._label("idx_done")
+        self._emit("TSTB")
+        self._emit(f"BEQ     {done}")
+        self._emit_label(loop)
+        for _ in range(elem_size):
+            self._emit("INX")
+        self._emit("DECB")
+        self._emit(f"BNE     {loop}")
+        self._emit_label(done)
+
+    def _gen_lvalue_address(self, expr: Expression) -> CType:
+        """Put the address of an lvalue in X and return its stored type."""
+        if isinstance(expr, Identifier):
+            sym = self._current_scope.lookup(expr.name)
+            if sym is None:
+                raise CodeGenError(f"Undefined variable: {expr.name}", expr)
+            if sym.is_global:
+                if sym.fixed_addr is not None:
+                    self._emit(f"LDX     {self._imm16(sym.fixed_addr)}")
+                else:
+                    self._emit(f"LDX     #{self._asm_symbol(sym)}")
+            else:
+                # Copy stable frame pointer Y -> X without changing Y or net SP.
+                self._emit("PSHY")
+                self._emit("PULX")
+                self._emit_add_x_const(sym.stack_offset)
+            return sym.ctype
+
+        if isinstance(expr, Deref):
+            ptr_t = self._gen_expr(expr.expr)
+            if not ptr_t.is_pointer:
+                raise CodeGenError("Cannot dereference non-pointer lvalue", expr)
+            self._emit("XGDX")
+            return ptr_t.pointed_to()
+
+        if isinstance(expr, ArraySubscript):
+            base_t = self._infer_expr_type(expr.array)
+            elem_t = base_t.element_type() if base_t.is_array else (
+                base_t.pointed_to() if base_t.is_pointer else None
+            )
+            if elem_t is None:
+                raise CodeGenError("Subscripted expression is not an array/pointer", expr)
+
+            idx_t = self._gen_expr(expr.index)
+            if idx_t.is_byte:
+                self._emit("TAB")
+            # For 16-bit indices B already holds the low byte. Fixed-size HC11
+            # arrays are intentionally limited to 255 elements in this ABI.
+            self._emit(f"STAB    {self._hex8(self._scratch_index_addr)}")
+
+            if base_t.is_array:
+                self._gen_lvalue_address(expr.array)
+            else:
+                self._gen_expr(expr.array)
+                self._emit("XGDX")
+
+            self._emit(f"LDAB    {self._hex8(self._scratch_index_addr)}")
+            self._emit_scaled_index_add(elem_t.size)
+            return elem_t
+
+        if isinstance(expr, MemberAccess):
+            obj_t = self._infer_expr_type(expr.object)
+            if expr.is_arrow:
+                if not obj_t.is_pointer:
+                    raise CodeGenError("'->' requires pointer-to-struct", expr)
+                struct_t = obj_t.pointed_to()
+                self._gen_expr(expr.object)
+                self._emit("XGDX")
+            else:
+                struct_t = obj_t
+                self._gen_lvalue_address(expr.object)
+            field = self._get_struct_field(struct_t, expr.member, expr)
+            self._emit_add_x_const(field.offset)
+            return field.ctype
+
+        raise CodeGenError(f"Expression is not an addressable lvalue: {type(expr).__name__}", expr)
+
+    def _load_lvalue(self, expr: Expression) -> CType:
+        ctype = self._gen_lvalue_address(expr)
+        if ctype.is_array:
+            # C array-to-pointer decay.
+            self._emit("XGDX")
+            return ctype.element_type().pointer_to()
+        if ctype.base == "struct" and not ctype.is_pointer:
+            raise CodeGenError("Whole-struct rvalue copies are not supported", expr)
+        if ctype.size == 1:
+            self._emit("LDAA    0,X")
+        elif ctype.size == 2:
+            self._emit("LDD     0,X")
+        else:
+            raise CodeGenError(f"Cannot scalar-load {ctype.size}-byte object", expr)
+        return ctype
+
+    def _coerce_result(self, src: CType, dst: CType):
+        """Coerce the current A/D result to the scalar destination width."""
+        if dst.size == 1 and src.size == 2:
+            self._emit("TBA")
+        elif dst.size == 2 and src.size == 1:
+            self._emit("TAB")
+            if src.is_unsigned:
+                self._emit("CLRA")
+            else:
+                self._emit("CLRA")
+                ok = self._label("sext_ok")
+                self._emit("TSTB")
+                self._emit(f"BPL     {ok}")
+                self._emit("LDAA    #$FF")
+                self._emit_label(ok)
+
+    def _store_lvalue(self, expr: Expression, src_type: CType) -> CType:
+        dst_type = self._infer_expr_type(expr)
+        if dst_type.is_array or (dst_type.base == "struct" and not dst_type.is_pointer):
+            raise CodeGenError("Aggregate assignment/copy is not supported", expr)
+        self._coerce_result(src_type, dst_type)
+
+        if dst_type.size == 1:
+            self._emit("PSHA")
+        elif dst_type.size == 2:
+            self._emit("PSHB")
+            self._emit("PSHA")
+        else:
+            raise CodeGenError(f"Cannot scalar-store {dst_type.size}-byte object", expr)
+
+        self._gen_lvalue_address(expr)
+
+        if dst_type.size == 1:
+            self._emit("PULA")
+            self._emit("STAA    0,X")
+        else:
+            self._emit("PULA")
+            self._emit("PULB")
+            self._emit("STD     0,X")
+        return dst_type
+
     def _gen_identifier_load(self, ident: Identifier) -> CType:
-        """Load a variable's value into AccA or AccD."""
+        """Load a scalar identifier or decay an array to a pointer."""
         sym = self._current_scope.lookup(ident.name)
         if sym is None:
             raise CodeGenError(f"Undefined variable: {ident.name}", ident)
 
+        if sym.ctype.is_array:
+            self._gen_lvalue_address(ident)
+            self._emit("XGDX")
+            return sym.ctype.element_type().pointer_to()
+        if sym.ctype.base == "struct" and not sym.ctype.is_pointer:
+            raise CodeGenError("Whole-struct rvalue copies are not supported", ident)
+
         if sym.is_global:
             addr = sym.fixed_addr
+            asm_name = self._asm_symbol(sym)
             if addr is not None and addr <= 0xFF:
-                # Direct page addressing (faster)
                 if sym.ctype.size == 1:
                     self._emit(f"LDAA    {self._hex8(addr)}     ; {sym.name}")
                 else:
                     self._emit(f"LDD     {self._hex8(addr)}     ; {sym.name}")
             elif addr is not None:
-                # Extended addressing
                 if sym.ctype.size == 1:
                     self._emit(f"LDAA    {self._hex16(addr)}   ; {sym.name}")
                 else:
                     self._emit(f"LDD     {self._hex16(addr)}   ; {sym.name}")
             else:
-                # Symbol name reference
                 if sym.ctype.size == 1:
-                    self._emit(f"LDAA    {sym.name}")
+                    self._emit(f"LDAA    {asm_name}")
                 else:
-                    self._emit(f"LDD     {sym.name}")
+                    self._emit(f"LDD     {asm_name}")
         else:
-            # Local variable: access via frame pointer
-            self._emit("TSX")
             if sym.ctype.size == 1:
-                self._emit(f"LDAA    {sym.stack_offset},X  ; {sym.name}")
+                self._emit(f"LDAA    {sym.stack_offset},Y  ; {sym.name}")
             else:
-                self._emit(f"LDD     {sym.stack_offset},X  ; {sym.name}")
+                self._emit(f"LDD     {sym.stack_offset},Y  ; {sym.name}")
 
         return sym.ctype
 
     def _gen_identifier_store(self, ident: Identifier, ctype: CType):
-        """Store AccA or AccD to a variable location."""
+        """Store the current scalar result to an identifier."""
         sym = self._current_scope.lookup(ident.name)
         if sym is None:
             raise CodeGenError(f"Undefined variable: {ident.name}", ident)
+        if sym.ctype.is_array or (sym.ctype.base == "struct" and not sym.ctype.is_pointer):
+            raise CodeGenError("Aggregate assignment/copy is not supported", ident)
 
+        self._coerce_result(ctype, sym.ctype)
         if sym.is_global:
             addr = sym.fixed_addr
+            asm_name = self._asm_symbol(sym)
             if addr is not None and addr <= 0xFF:
                 if sym.ctype.size == 1:
                     self._emit(f"STAA    {self._hex8(addr)}     ; {sym.name}")
@@ -728,15 +1040,14 @@ class CodeGenerator:
                     self._emit(f"STD     {self._hex16(addr)}   ; {sym.name}")
             else:
                 if sym.ctype.size == 1:
-                    self._emit(f"STAA    {sym.name}")
+                    self._emit(f"STAA    {asm_name}")
                 else:
-                    self._emit(f"STD     {sym.name}")
+                    self._emit(f"STD     {asm_name}")
         else:
-            self._emit("TSX")
             if sym.ctype.size == 1:
-                self._emit(f"STAA    {sym.stack_offset},X  ; {sym.name}")
+                self._emit(f"STAA    {sym.stack_offset},Y  ; {sym.name}")
             else:
-                self._emit(f"STD     {sym.stack_offset},X  ; {sym.name}")
+                self._emit(f"STD     {sym.stack_offset},Y  ; {sym.name}")
 
     def _gen_binary_op(self, op: BinaryOp) -> CType:
         """Generate code for a binary operation.
@@ -1164,71 +1475,15 @@ class CodeGenerator:
         return result_type
 
     def _gen_assignment(self, asgn: Assignment) -> CType:
-        """Generate simple assignment."""
-        # Evaluate RHS
+        """Generate scalar assignment through the common lvalue path."""
         rtype = self._gen_expr(asgn.value)
-
-        # Store to LHS
         if isinstance(asgn.target, Identifier):
+            dst = self._infer_expr_type(asgn.target)
             self._gen_identifier_store(asgn.target, rtype)
-        elif isinstance(asgn.target, Deref):
-            # *ptr = value  ->  store through pointer
-            # Check for constant address (volatile I/O): *(type*)0x1030 = val
-            const_addr = self._try_get_const_ptr_addr(asgn.target.expr)
-            if const_addr is not None:
-                addr, pointed = const_addr
-                addr_str = self._hex16(addr) if addr > 0xFF else self._hex8(addr)
-                if pointed.size == 1:
-                    self._emit(f"STAA    {addr_str}  ; *({self._hex16(addr)}) = A direct")
-                else:
-                    self._emit(f"STD     {addr_str}  ; *({self._hex16(addr)}) = D direct")
-            else:
-                # General path: evaluate pointer, store through X
-                val_size = rtype.size
-                if val_size == 1:
-                    self._emit("PSHA")         # save 8-bit value
-                else:
-                    self._emit("PSHB")         # save 16-bit value (D = A:B)
-                    self._emit("PSHA")
-                ptr_type = self._gen_expr(asgn.target.expr)  # pointer addr -> D (16-bit)
-                self._emit("XGDX")         # X = pointer address
-                if val_size == 1:
-                    self._emit("PULA")         # A = value to store
-                    self._emit("STAA    0,X")  # *ptr = A (byte)
-                else:
-                    self._emit("PULA")         # restore D (A first, then B)
-                    self._emit("PULB")
-                    self._emit("STD     0,X")  # *ptr = D (word)
-        elif isinstance(asgn.target, ArraySubscript):
-            # array[index] = value
-            val_size = rtype.size
-            if val_size == 1:
-                self._emit("PSHA")         # save value (8-bit)
-            else:
-                self._emit("PSHB")
-                self._emit("PSHA")         # save value (16-bit D)
-            # Calculate address: base pointer + index
-            self._gen_expr(asgn.target.array)  # base addr -> D
-            self._emit("PSHB")
-            self._emit("PSHA")            # save base addr
-            self._gen_expr(asgn.target.index)  # index -> A
-            self._emit("TAB")             # B = index
-            self._emit("PULA")            # restore base addr into D
-            self._emit("PULB")            # (PULA gets A=high, but we need to
-            #                               add index to low byte — use ABX)
-            self._emit("XGDX")            # X = base address
-            self._emit("ABX")             # X = X + B (base + index)
-            if val_size == 1:
-                self._emit("PULA")         # A = value
-                self._emit("STAA    0,X")
-            else:
-                self._emit("PULA")
-                self._emit("PULB")
-                self._emit("STD     0,X")
-        else:
-            self._emit_comment(f"TODO: assignment to {type(asgn.target).__name__}")
-
-        return rtype
+            return dst
+        if isinstance(asgn.target, (Deref, ArraySubscript, MemberAccess)):
+            return self._store_lvalue(asgn.target, rtype)
+        raise CodeGenError(f"Unsupported assignment target: {type(asgn.target).__name__}", asgn)
 
     def _gen_compound_assignment(self, asgn: CompoundAssignment) -> CType:
         """Generate compound assignment (+=, -=, |=, &=, etc.)."""
@@ -1288,8 +1543,7 @@ class CodeGenerator:
             return CType("int")
 
     def _gen_func_call(self, call: FuncCall) -> CType:
-        """Generate function call."""
-        # Push arguments right-to-left
+        """Generate function call with right-to-left stack arguments."""
         total_arg_size = 0
         for arg in reversed(call.args):
             arg_type = self._gen_expr(arg)
@@ -1301,19 +1555,16 @@ class CodeGenerator:
                 self._emit("PSHA")
                 total_arg_size += 2
 
-        self._emit(f"JSR     {call.name}")
+        sym = self._global_scope.lookup(call.name)
+        call_name = self._asm_symbol(sym) if sym else call.name
+        self._emit(f"JSR     {call_name}")
 
-        # Cleanup arguments from stack
         if total_arg_size > 0:
             for _ in range(total_arg_size):
                 self._emit("INS")
             self._emit_comment(f"clean {total_arg_size} bytes args")
 
-        # Return value is in A (8-bit) or D (16-bit)
-        sym = self._global_scope.lookup(call.name)
-        if sym:
-            return sym.ctype
-        return CType("int")
+        return sym.ctype if sym else CType("int")
 
     def _try_get_const_ptr_addr(self, expr) -> Optional[Tuple[int, CType]]:
         """Check if an expression is a constant pointer (cast of int literal).
@@ -1333,60 +1584,14 @@ class CodeGenerator:
         return None
 
     def _gen_deref(self, deref: Deref) -> CType:
-        """Generate pointer dereference: *ptr.
-
-        Optimized path for constant addresses (memory-mapped I/O):
-          *(volatile unsigned char *)0x1030  →  LDAA $1030  (direct)
-
-        General path: load pointer into D, XGDX, indexed load.
-        """
-        # Check for constant pointer address (volatile I/O optimization)
-        const_addr = self._try_get_const_ptr_addr(deref.expr)
-        if const_addr is not None:
-            addr, pointed = const_addr
-            addr_str = self._hex16(addr) if addr > 0xFF else self._hex8(addr)
-            if pointed.size == 1:
-                self._emit(f"LDAA    {addr_str}  ; *({self._hex16(addr)}) direct")
-            else:
-                self._emit(f"LDD     {addr_str}  ; *({self._hex16(addr)}) direct")
-            return pointed
-
-        # General path: evaluate pointer expression
-        ptr_type = self._gen_expr(deref.expr)
-
-        # Pointer value should be in D (16-bit address)
-        # Move to X for indexed load
-        self._emit("XGDX")            # X = D (pointer value)
-        if ptr_type.is_pointer:
-            pointed = ptr_type.pointed_to()
-            if pointed.size == 1:
-                self._emit("LDAA    0,X     ; *ptr (byte)")
-            else:
-                self._emit("LDD     0,X     ; *ptr (word)")
-            return pointed
-        else:
-            # Assume byte dereference
-            self._emit("LDAA    0,X     ; *ptr")
-            return CType("char", is_unsigned=True)
+        """Generate pointer dereference using the common typed lvalue path."""
+        return self._load_lvalue(deref)
 
     def _gen_addr_of(self, addr: AddrOf) -> CType:
-        """Generate address-of: &var."""
-        if isinstance(addr.expr, Identifier):
-            sym = self._current_scope.lookup(addr.expr.name)
-            if sym is None:
-                raise CodeGenError(f"Undefined variable: {addr.expr.name}", addr)
-            if sym.is_global and sym.fixed_addr is not None:
-                self._emit(f"LDD     {self._imm16(sym.fixed_addr)}  ; &{sym.name}")
-            else:
-                # Local: compute address from stack frame
-                self._emit("TSX")
-                self._emit(f"XGDX")   # D = frame pointer
-                if sym.stack_offset > 0:
-                    self._emit(f"ADDD    {self._imm16(sym.stack_offset)}")
-            return sym.ctype.pointer_to()
-        else:
-            self._emit_comment("TODO: address-of complex expr")
-            return CType("void", pointer_depth=1)
+        """Generate address-of for any supported lvalue."""
+        ctype = self._gen_lvalue_address(addr.expr)
+        self._emit("XGDX")
+        return ctype.pointer_to()
 
     def _gen_cast(self, cast: Cast) -> CType:
         """Generate type cast."""
@@ -1462,20 +1667,12 @@ class CodeGenerator:
         return CType("int")
 
     def _gen_array_subscript(self, sub: ArraySubscript) -> CType:
-        """Generate array[index] read."""
-        # Load base address
-        self._gen_expr(sub.array)
-        self._emit("PSHA")
-        # Load index
-        self._gen_expr(sub.index)
-        self._emit("TAB")             # B = index
-        self._emit("PULA")            # A = base
-        self._emit("ABA")             # A = base + index
-        self._emit("TAB")
-        self._emit("CLRA")
-        self._emit("XGDX")            # X = address
-        self._emit("LDAA    0,X")     # load byte at address
-        return CType("char", is_unsigned=True)
+        """Generate typed array/pointer subscript read."""
+        return self._load_lvalue(sub)
+
+    def _gen_member_access(self, member: MemberAccess) -> CType:
+        """Generate typed struct member read."""
+        return self._load_lvalue(member)
 
     def _gen_ternary(self, op: TernaryOp) -> CType:
         """Generate ternary: cond ? a : b."""
@@ -1496,15 +1693,18 @@ class CodeGenerator:
         return CType("int")
 
     def _gen_sizeof(self, expr: SizeofExpr) -> CType:
-        """Generate sizeof — resolved at compile time."""
+        """Generate sizeof resolved entirely at compile time."""
         if expr.target_type:
             size = expr.target_type.size
+        elif expr.target_expr is not None:
+            size = self._infer_expr_type(expr.target_expr).size
         else:
-            size = 2  # default assumption
-        self._emit(f"LDAA    {self._imm8(size)}  ; sizeof")
+            size = 0
+        if size <= 0xFF:
+            self._emit(f"LDAA    {self._imm8(size)}  ; sizeof")
+            return CType("char", is_unsigned=True)
+        self._emit(f"LDD     {self._imm16(size)}  ; sizeof")
         return CType("int", is_unsigned=True)
-
-    # ── String data generation ────────────────
 
     def _gen_string_data(self):
         """Emit string literal data at end of code section."""
