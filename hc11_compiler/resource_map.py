@@ -203,12 +203,47 @@ class ResourceMap:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ResourceMap":
-        if data.get("format") not in (None, "k11-resource-map"):
+        # Treat serialized resource maps as untrusted inputs. Previously a
+        # hand-authored JSON map could preload overlapping/invalid allocations
+        # and bypass all collision checks in reserve()/allocate(). link_objects
+        # clones its input map through this same path, so validate on admission.
+        if type(data) is not dict or data.get("format") not in (None, "k11-resource-map"):
             raise ResourceMapError("Unsupported resource-map format")
-        return cls(
-            regions=[MemoryRegion.from_dict(x) for x in data.get("regions", [])],
-            allocations=[Allocation.from_dict(x) for x in data.get("allocations", [])],
-        )
+        if data.get("version", 1) != 1 or type(data.get("version", 1)) is not int:
+            raise ResourceMapError("Unsupported resource-map version")
+        region_data, allocation_data = data.get("regions", []), data.get("allocations", [])
+        if type(region_data) is not list or type(allocation_data) is not list:
+            raise ResourceMapError("Resource-map regions and allocations must be arrays")
+        if len(region_data) > 4096 or len(allocation_data) > 65536:
+            raise ResourceMapError("Resource-map input count exceeds bounds")
+        try:
+            regions = [MemoryRegion.from_dict(x) for x in region_data]
+            allocations = [Allocation.from_dict(x) for x in allocation_data]
+        except (TypeError, ValueError, KeyError, AttributeError) as exc:
+            raise ResourceMapError("Invalid resource-map entry") from exc
+        for region in regions:
+            if (not region.name.strip() or not region.kind.strip() or
+                    type(region.start) is bool or type(region.end) is bool or
+                    not 0 <= region.start <= region.end <= 0xFFFF or
+                    region.alignment <= 0):
+                raise ResourceMapError("Invalid region bounds, kind or alignment")
+        observed = []
+        for alloc in allocations:
+            if (not alloc.name.strip() or not alloc.kind.strip() or
+                    type(alloc.start) is bool or
+                    alloc.size <= 0 or not 0 <= alloc.start <= 0xFFFF or
+                    alloc.end > 0xFFFF):
+                raise ResourceMapError("Invalid allocation bounds, name or kind")
+            if not any(r.kind == alloc.kind and r.contains(alloc.start, alloc.size)
+                       for r in regions):
+                raise ResourceMapError(
+                    f"Preloaded allocation {alloc.name!r} is outside a matching region")
+            for prior in observed:
+                if prior.overlaps(alloc.start, alloc.size):
+                    raise ResourceCollisionError(
+                        f"Preloaded allocation {alloc.name!r} collides with {prior.name!r}")
+            observed.append(alloc)
+        return cls(regions=regions, allocations=allocations)
 
     @classmethod
     def default_for_target(cls, target: str) -> "ResourceMap":
