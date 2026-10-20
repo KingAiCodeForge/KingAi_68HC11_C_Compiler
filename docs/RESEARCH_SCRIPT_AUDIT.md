@@ -411,7 +411,7 @@ On Windows / Python 3.13.5: `python -m pytest tests/research_tools -q` ran **25 
 - CLI: No command-line parser; Python API only.
 - API: No public definitions; module constants/import-time script only.
 - Coverage: Empty package marker; no behavior to qualify.
-- Findings/status: 
+- Findings/status: Package marker; no executable behavior.
 
 ### `hc11_virtual_emulator/src/aldl/__init__.py`
 
@@ -419,7 +419,7 @@ On Windows / Python 3.13.5: `python -m pytest tests/research_tools -q` ran **25 
 - CLI: No command-line parser; Python API only.
 - API: No public definitions; module constants/import-time script only.
 - Coverage: Empty package marker; no behavior to qualify.
-- Findings/status: 
+- Findings/status: Package marker; no executable behavior.
 
 ### `hc11_virtual_emulator/src/aldl/mode4_harness.py`
 
@@ -435,7 +435,7 @@ On Windows / Python 3.13.5: `python -m pytest tests/research_tools -q` ran **25 
 - CLI: No command-line parser; Python API only.
 - API: No public definitions; module constants/import-time script only.
 - Coverage: Empty package marker; no behavior to qualify.
-- Findings/status: 
+- Findings/status: Package marker; no executable behavior.
 
 ### `hc11_virtual_emulator/src/cpu/alu.py`
 
@@ -475,7 +475,7 @@ On Windows / Python 3.13.5: `python -m pytest tests/research_tools -q` ran **25 
 - CLI: No command-line parser; Python API only.
 - API: No public definitions; module constants/import-time script only.
 - Coverage: Empty package marker; no behavior to qualify.
-- Findings/status: 
+- Findings/status: Package marker; no executable behavior.
 
 ### `hc11_virtual_emulator/src/mem/memory.py`
 
@@ -491,7 +491,7 @@ On Windows / Python 3.13.5: `python -m pytest tests/research_tools -q` ran **25 
 - CLI: No command-line parser; Python API only.
 - API: No public definitions; module constants/import-time script only.
 - Coverage: Empty package marker; no behavior to qualify.
-- Findings/status: 
+- Findings/status: Package marker; no executable behavior.
 
 ### `hc11_virtual_emulator/src/periph/adc.py`
 
