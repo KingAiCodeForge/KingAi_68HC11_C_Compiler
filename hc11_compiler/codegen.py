@@ -97,9 +97,8 @@ TARGET_PROFILES = {
         "ram_end": 0x03FF,
         "io_base": 0x1000,
         "vectors": 0xFFD6,
-        "bank_select_port": 0x03,
-        "bank_select_bit": 3,
-        "description": "VY V6 PCM (09356445) - HC11F1, 128KB bank-switched",
+        "bank_switch_note": "Register/bit/state mapping requires variant-specific proof; codegen emits no switching sequence",
+        "description": "VY V6 $060A-family layout - HC11F1, 128KB bank-switched",
     },
     "1227730": {
         "org": 0x8000,
@@ -123,9 +122,10 @@ TARGET_PROFILES = {
 
 
 class CodeGenError(Exception):
-    def __init__(self, message: str, node: ASTNode):
+    def __init__(self, message: str, node: Optional[ASTNode] = None):
         self.node = node
-        super().__init__(f"Code generation error at L{node.line}:{node.col}: {message}")
+        location = f" at L{node.line}:{node.col}" if node is not None else ""
+        super().__init__(f"Code generation error{location}: {message}")
 
 
 class CodeGenerator:
@@ -134,6 +134,11 @@ class CodeGenerator:
     def __init__(self, org: int = 0x8000, stack: int = 0x00FF,
                  target: str = "generic", relocatable: bool = False,
                  module_name: Optional[str] = None):
+        if target not in TARGET_PROFILES:
+            raise CodeGenError(f"Unknown target profile: {target}")
+        for name, value in (("org", org), ("stack", stack)):
+            if type(value) is not int or not 0 <= value <= 0xFFFF:
+                raise CodeGenError(f"{name} must be an integer in 0..0xFFFF")
         self.org = org
         self.stack = stack
         self.target = target
@@ -282,9 +287,7 @@ class CodeGenerator:
             self._header_lines.append(f"        ORG     {self._hex16(self.org)}")
         else:
             self._header_lines.append(f"; relocatable module: {self.module_name}")
-        self._header_lines.append(
-            f""
-        ]
+        self._header_lines.append("")
 
     def _assemble_output(self) -> str:
         sections = []
@@ -1127,47 +1130,10 @@ class CodeGenerator:
                 self._emit(f"EORA    {scratch16}")
                 self._emit(f"EORB    {self._hex8(self._scratch_addr)}")
             elif op.op == "<<":
-                # Shift D left by N positions (N in scratch low byte)
-                self._emit(f"LDAA    {self._hex8(self._scratch_addr)}  ; shift count")
-                self._emit("PSHA")     # save count
-                # Restore D = left (already there from above, but we just
-                # clobbered A with the shift count; need to reload left)
-                # Actually D still has left from the ADDD path setup.
-                # We need a different approach: save D, get count, loop.
-                # Let's redo: D=left is in D. Count is in scratch.
-                self._emit("PULA")     # discard the count push (we'll use B)
-                self._emit(f"PSHB")    # save D low
-                self._emit(f"PSHA")    # save D high
-                self._emit(f"LDAB    {self._hex8(self._scratch_addr)}  ; B = shift count")
-                self._emit("PULA")     # restore D
-                self._emit("PULB")
-                # Wait — we overwrote B with count. Let me restructure.
-                # Simplest: shift count on stack, D has the value.
-                # Pop and restart:
-                # Actually, let's just use a clean approach with D=left and
-                # shift count in a scratch byte.
-                # D was already loaded with left. scratch_addr has right low byte = count.
+                # D already holds the restored left operand. Keep the count
+                # in scratch: loading it into A would corrupt D's high byte.
                 lbl_top = self._label("shl16")
                 lbl_end = self._label("shl16e")
-                # We need to reload D with left since we've been clobbering it.
-                # The cleanest way: reload from scratch16 the right (count), then
-                # re-derive D.
-                # Actually, let's back up. For shifts, count is always small (0-15).
-                # The real pattern: D has the value to shift, count is an 8-bit in scratch.
-                # Since we already set up D = left above, and then stored right to scratch,
-                # D still = left at this point (we haven't done ADDD etc for shift).
-                # Hmm, we did STD scratch which didn't change D. Then PULA/PULB restored left.
-                # So D = left. And scratch has right. The low byte of right is the count.
-                # B is low byte of D (part of the value). We need count somewhere else.
-                # Use X as counter via a loop.
-                self._emit(f"PSHB")    # save D low byte
-                self._emit(f"LDAB    {self._hex8(self._scratch_addr)}  ; B = shift count")
-                self._emit("PSHA")     # save D high byte
-                # Now stack has [D_high][D_low], B = count
-                # We need D back for ASLD. Use scratch to hold count.
-                self._emit(f"STAB    {self._hex8(self._scratch_addr)}")  # count in scratch
-                self._emit("PULA")     # A = D high
-                self._emit("PULB")     # B = D low → D restored
                 self._emit_label(lbl_top)
                 self._emit(f"TST     {self._hex8(self._scratch_addr)}")
                 self._emit(f"BEQ     {lbl_end}")

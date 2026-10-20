@@ -10,7 +10,7 @@ from typing import Dict, Iterable, List, Optional
 
 from .ast_nodes import ASTNode, FuncCall, FuncDecl, Identifier, Program, VarDecl
 from .assembler import Assembler, AssemblerError
-from .codegen import CodeGenerator
+from .codegen import CodeGenerator, TARGET_PROFILES
 from .lexer import Lexer
 from .parser import Parser
 
@@ -34,7 +34,11 @@ class ObjectSymbol:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ObjectSymbol":
-        return cls(name=str(data["name"]), kind=str(data["kind"]))
+        if (type(data) is not dict or type(data.get("name")) is not str
+                or not re.fullmatch(r"[A-Za-z_.][A-Za-z0-9_.$]*", data["name"])
+                or data.get("kind") not in ("function", "data")):
+            raise ObjectFormatError("Invalid K11O symbol name or kind")
+        return cls(name=data["name"], kind=data["kind"])
 
 
 @dataclass
@@ -71,17 +75,38 @@ class RelocatableObject:
 
     @classmethod
     def from_dict(cls, data: dict) -> "RelocatableObject":
-        if data.get("magic") != OBJECT_MAGIC:
+        if type(data) is not dict or data.get("magic") != OBJECT_MAGIC:
             raise ObjectFormatError("Not a K11O relocatable object")
-        if int(data.get("version", 0)) != OBJECT_VERSION:
+        if type(data.get("version")) is not int or data["version"] != OBJECT_VERSION:
             raise ObjectFormatError(
                 f"Unsupported K11O version: {data.get('version')}"
             )
+        for name in ("module", "target", "assembly", "source_sha256"):
+            if type(data.get(name)) is not str:
+                raise ObjectFormatError(f"K11O {name} must be a string")
+        if data["target"] not in TARGET_PROFILES:
+            raise ObjectFormatError("Unknown K11O target profile")
+        if not data["module"] or not re.fullmatch(r"[A-Za-z0-9_]+", data["module"]):
+            raise ObjectFormatError("Invalid K11O module name")
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", data["source_sha256"]):
+            raise ObjectFormatError("Invalid K11O source SHA256")
+        for name in ("exports", "imports", "resources"):
+            if type(data.get(name, [])) is not list:
+                raise ObjectFormatError(f"K11O {name} must be an array")
+        for request in data.get("resources", []):
+            if (type(request) is not dict or type(request.get("name")) is not str
+                    or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", request["name"])
+                    or type(request.get("kind")) is not str or not request["kind"].strip()
+                    or type(request.get("size")) is not int
+                    or not 0 < request["size"] <= 0x10000
+                    or type(request.get("alignment", 1)) is not int
+                    or not 0 < request.get("alignment", 1) <= 0x10000):
+                raise ObjectFormatError("Invalid K11O resource request")
         return cls(
-            module=str(data["module"]),
-            target=str(data["target"]),
-            assembly=str(data["assembly"]),
-            source_sha256=str(data["source_sha256"]),
+            module=data["module"],
+            target=data["target"],
+            assembly=data["assembly"],
+            source_sha256=data["source_sha256"],
             exports=[ObjectSymbol.from_dict(x) for x in data.get("exports", [])],
             imports=[ObjectSymbol.from_dict(x) for x in data.get("imports", [])],
             resources=[dict(x) for x in data.get("resources", [])],
@@ -349,7 +374,7 @@ def compile_asm_object(assembly: str, *, module_name: str,
                 f"Assembly object does not assemble cleanly: {exc}"
             ) from exc
 
-    return RelocatableObject(
+    obj = RelocatableObject(
         module=module,
         target=target,
         assembly=normalized,
@@ -364,6 +389,7 @@ def compile_asm_object(assembly: str, *, module_name: str,
         ],
         resources=[dict(x) for x in (resources or [])],
     )
+    return RelocatableObject.from_dict(obj.to_dict())
 
 
 def compile_kcos_module(source: str, *, module_name: str,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import List, Optional
+from math import lcm
 
 
 class ResourceMapError(Exception):
@@ -15,20 +16,26 @@ class ResourceCollisionError(ResourceMapError):
 
 
 def _as_int(value) -> int:
-    if isinstance(value, int):
+    if type(value) is int:
         return value
     if isinstance(value, str):
         text = value.strip()
         if text.startswith("$"):
             return int(text[1:], 16)
         return int(text, 0)
-    raise TypeError(f"Expected integer address, got {type(value).__name__}")
+    raise ResourceMapError(f"Expected integer value, got {type(value).__name__}")
 
 
 def _align_up(value: int, alignment: int) -> int:
     if alignment <= 0:
         raise ValueError("alignment must be positive")
     return ((value + alignment - 1) // alignment) * alignment
+
+
+def _text(value, *, empty=False):
+    if type(value) is not str or (not empty and not value.strip()):
+        raise ResourceMapError("Resource names and kinds must be nonempty strings")
+    return value
 
 
 @dataclass(frozen=True)
@@ -61,11 +68,11 @@ class MemoryRegion:
     @classmethod
     def from_dict(cls, data: dict) -> "MemoryRegion":
         return cls(
-            name=str(data["name"]),
-            kind=str(data["kind"]),
+            name=_text(data["name"]),
+            kind=_text(data["kind"]),
             start=_as_int(data["start"]),
             end=_as_int(data["end"]),
-            alignment=int(data.get("alignment", 1)),
+            alignment=_as_int(data.get("alignment", 1)),
         )
 
 
@@ -98,13 +105,15 @@ class Allocation:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Allocation":
+        if type(data.get("reserved", False)) is not bool:
+            raise ResourceMapError("Allocation reserved must be a boolean")
         return cls(
-            name=str(data["name"]),
-            kind=str(data["kind"]),
+            name=_text(data["name"]),
+            kind=_text(data["kind"]),
             start=_as_int(data["start"]),
-            size=int(data["size"]),
-            module=str(data.get("module", "")),
-            reserved=bool(data.get("reserved", False)),
+            size=_as_int(data["size"]),
+            module=_text(data.get("module", ""), empty=True),
+            reserved=data.get("reserved", False),
         )
 
 
@@ -144,7 +153,12 @@ class ResourceMap:
     def reserve(self, kind: str, start: int, size: int, name: str,
                 module: str = "", *, reserved: bool = True) -> Allocation:
         start = _as_int(start)
-        size = int(size)
+        size = _as_int(size)
+        _text(kind)
+        _text(name)
+        _text(module, empty=True)
+        if type(reserved) is not bool:
+            raise ResourceMapError("reserved must be a boolean")
         if size <= 0:
             raise ResourceMapError(f"{name}: size must be positive")
         region = self._region_for_range(kind, start, size)
@@ -167,11 +181,17 @@ class ResourceMap:
         return alloc
 
     def find_free(self, kind: str, size: int, alignment: int = 1) -> int:
-        size = int(size)
+        size = _as_int(size)
+        alignment = _as_int(alignment)
+        if alignment <= 0:
+            raise ResourceMapError("alignment must be positive")
         if size <= 0:
             raise ResourceMapError("allocation size must be positive")
         for region in self.regions_for(kind):
-            effective_alignment = max(int(alignment), int(region.alignment), 1)
+            region_alignment = _as_int(region.alignment)
+            if region_alignment <= 0:
+                raise ResourceMapError("region alignment must be positive")
+            effective_alignment = lcm(alignment, region_alignment)
             candidate = _align_up(region.start, effective_alignment)
             while candidate + size - 1 <= region.end:
                 hit = self._collision(candidate, size)

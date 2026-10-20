@@ -1,5 +1,10 @@
 # 68HC11 C Compiler for Delco PCMs — Design Specification
 
+> Historical design document. The 0.4.0a1 alpha boundaries and current measured
+> checks are in [README.md](README.md), [active audit](docs/ACTIVE_MODULE_AUDIT.md)
+> and [release qualification](docs/RELEASE_QUALIFICATION.md). Old test counts and
+> readiness statements below are retained history, not current qualification.
+
 > **Last updated:** February 2026
 > **Status:** Alpha — full C → ASM → binary pipeline working, 74/74 tests passing
 

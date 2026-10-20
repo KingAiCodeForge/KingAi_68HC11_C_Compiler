@@ -20,6 +20,8 @@ from hc11_compiler.objectfile import (
     compile_kcos_module,
 )
 from hc11_compiler.resource_map import ResourceMap, ResourceMapError
+from hc11_compiler import __version__
+from hc11_compiler.cli import validate_command_outputs, validate_outputs, write_command_output
 
 
 def _module_name(path: str) -> str:
@@ -46,15 +48,15 @@ def _infer_image_format(path: str, explicit: str | None) -> str:
     }.get(ext, "bin")
 
 
-def _write_image(image, path: str, fmt: str):
+def _write_image(image, path: str, fmt: str, args):
     if fmt == "bin":
-        Path(path).write_bytes(image.binary)
+        write_command_output(args, path, image.binary)
     elif fmt == "s19":
-        Path(path).write_text(image.s19, encoding="utf-8")
+        write_command_output(args, path, image.s19)
     elif fmt == "listing":
-        Path(path).write_text(image.listing, encoding="utf-8")
+        write_command_output(args, path, image.listing)
     elif fmt == "asm":
-        Path(path).write_text(image.assembly, encoding="utf-8")
+        write_command_output(args, path, image.assembly)
     else:
         raise ValueError(f"Unsupported image format: {fmt}")
 
@@ -64,7 +66,7 @@ def cmd_compile(args) -> int:
     module = args.module or _module_name(args.input)
     obj = compile_kcos_module(source, module_name=module, target=args.target)
     output = args.output or str(Path(args.input).with_suffix(".k11o"))
-    obj.save(output)
+    write_command_output(args, output, obj.dumps() + "\n")
     if args.verbose:
         print(
             f"[hc11kcos] {obj.module}: {len(obj.exports)} export(s), "
@@ -86,7 +88,7 @@ def cmd_asm_object(args) -> int:
         imports=args.import_symbol,
     )
     output = args.output or str(Path(args.input).with_suffix(".k11o"))
-    obj.save(output)
+    write_command_output(args, output, obj.dumps() + "\n")
     if args.verbose:
         print(
             f"[hc11kcos] {obj.module}: assembly object, "
@@ -103,12 +105,10 @@ def cmd_link(args) -> int:
     rmap = _load_resource_map(args.resource_map, target)
     image = link_objects(objects, resource_map=rmap)
     fmt = _infer_image_format(args.output, args.format)
-    _write_image(image, args.output, fmt)
+    _write_image(image, args.output, fmt, args)
 
     if args.map_out:
-        Path(args.map_out).write_text(
-            image.resource_map.to_json() + "\n", encoding="utf-8"
-        )
+        write_command_output(args, args.map_out, image.resource_map.to_json() + "\n")
 
     if args.verbose:
         print(
@@ -139,18 +139,18 @@ def cmd_build(args) -> int:
     rmap = _load_resource_map(args.resource_map, args.target)
     image = link_objects(objects, resource_map=rmap)
     fmt = _infer_image_format(args.output, args.format)
-    _write_image(image, args.output, fmt)
-
     if args.objects_dir:
         outdir = Path(args.objects_dir)
         outdir.mkdir(parents=True, exist_ok=True)
+        validate_outputs(args.inputs + [args.output, args.map_out, args.resource_map],
+                         [outdir / f"{obj.module}.k11o" for obj in objects], force=args.force)
+    _write_image(image, args.output, fmt, args)
+    if args.objects_dir:
         for obj in objects:
-            obj.save(str(outdir / f"{obj.module}.k11o"))
+            write_command_output(args, str(outdir / f"{obj.module}.k11o"), obj.dumps() + "\n")
 
     if args.map_out:
-        Path(args.map_out).write_text(
-            image.resource_map.to_json() + "\n", encoding="utf-8"
-        )
+        write_command_output(args, args.map_out, image.resource_map.to_json() + "\n")
 
     if args.verbose:
         print(
@@ -165,7 +165,7 @@ def cmd_map(args) -> int:
     rmap = ResourceMap.default_for_target(args.target)
     text = rmap.to_json() + "\n"
     if args.output:
-        Path(args.output).write_text(text, encoding="utf-8")
+        write_command_output(args, args.output, text)
     else:
         sys.stdout.write(text)
     return 0
@@ -192,6 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="KCOS relocatable-object compiler and collision-checked HC11 linker",
     )
     sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--version", action="version", version=f"hc11kcos {__version__}")
 
     c = sub.add_parser("compile", help="compile one C file to a .k11o object")
     c.add_argument("input")
@@ -256,6 +257,9 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("object")
     i.set_defaults(func=cmd_inspect)
 
+    for child in (c, a, l, b, m):
+        child.add_argument("--force", action="store_true", help="Replace existing outputs; source inputs remain protected")
+
     return parser
 
 
@@ -263,6 +267,7 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
+        validate_command_outputs(args)
         return int(args.func(args))
     except (
         OSError, ValueError, LexerError, ParseError, CodeGenError,

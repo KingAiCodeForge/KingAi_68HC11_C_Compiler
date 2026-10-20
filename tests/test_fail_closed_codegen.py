@@ -61,11 +61,11 @@ def test_unknown_unary_operator_is_hard_error():
         ),
         (
             "void f(void) { unsigned char a[2]; ++a[0]; }",
-            "Unsupported pre-\+\+ target",
+            r"Unsupported pre-\+\+ target",
         ),
         (
             "void f(void) { unsigned char a[2]; a[0]++; }",
-            "Unsupported post-\+\+ target",
+            r"Unsupported post-\+\+ target",
         ),
     ],
 )

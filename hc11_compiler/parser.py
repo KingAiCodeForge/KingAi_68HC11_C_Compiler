@@ -522,13 +522,13 @@ class Parser:
         self._expect(TokenType.SEMI)
         return AsmStmt(instructions=str_tok.value, line=tok.line, col=tok.col)
 
-    def _parse_local_var_decl(self, is_zeropage: bool = False) -> VarDecl:
+    def _parse_local_var_decl(self, is_zeropage: bool = False) -> ASTNode:
         """Parse local variable declaration with semicolon."""
         decl = self._parse_local_var_decl_no_semi(is_zeropage)
         self._expect(TokenType.SEMI, "Expected ';' after variable declaration")
         return decl
 
-    def _parse_local_var_decl_no_semi(self, is_zeropage: bool = False) -> VarDecl:
+    def _parse_local_var_decl_no_semi(self, is_zeropage: bool = False) -> ASTNode:
         """Parse local variable declaration without consuming semicolon."""
         ctype = self._parse_type()
 
@@ -539,15 +539,25 @@ class Parser:
         if "zero_page" in attrs or "zeropage" in attrs:
             is_zeropage = True
 
-        name_tok = self._expect(TokenType.IDENT, "Expected variable name")
-        ctype = self._parse_array_suffix(ctype)
-        init = None
-        if self._match(TokenType.ASSIGN):
-            init = self._parse_expr()
-        return VarDecl(
-            name=name_tok.value, ctype=ctype, init=init, is_zeropage=is_zeropage,
-            line=name_tok.line, col=name_tok.col,
-        )
+        from dataclasses import replace
+        declarations = []
+        while True:
+            name_tok = self._expect(TokenType.IDENT, "Expected variable name")
+            declarator_type = self._parse_array_suffix(replace(ctype))
+            init = self._parse_expr() if self._match(TokenType.ASSIGN) else None
+            declarations.append(VarDecl(
+                name=name_tok.value, ctype=declarator_type, init=init,
+                is_zeropage=is_zeropage, line=name_tok.line, col=name_tok.col,
+            ))
+            if not self._match(TokenType.COMMA):
+                break
+            if ctype.pointer_depth:
+                raise ParseError("Separate pointer declarators into individual declarations", self._cur())
+        if len(declarations) == 1:
+            return declarations[0]
+        # This compiler uses a flat function frame. A declaration group does
+        # not introduce a new storage lifetime; codegen traverses this group.
+        return Block(statements=declarations, line=declarations[0].line, col=declarations[0].col)
 
     def _parse_expr_statement(self) -> ExprStatement:
         tok = self._cur()

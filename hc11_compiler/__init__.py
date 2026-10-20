@@ -4,7 +4,9 @@ KingAI 68HC11 C Compiler for Delco PCMs
 A subset-C compiler targeting the Motorola 68HC11 microcontroller,
 designed for Delco automotive Powertrain Control Modules (PCMs).
 
-Supports: VY V6 (09356445), 1227165, 1227730, 16197427 and compatible PCMs.
+Profiles: generic, VY V6 $060A-family memory layout, 1227730 and 16197427.
+A profile selects a compiler memory model. It does not identify or qualify an
+engine, ECU service number, OS, calibration, image hash, bank state or patch site.
 
 Architecture (for contributors / porters to other languages):
     ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌───────────┐    ┌───────────┐
@@ -24,7 +26,7 @@ Architecture (for contributors / porters to other languages):
     - linker.py: multi-object symbol/resource linker
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.0a1"
 __author__ = "KingAI"
 
 from .lexer import Lexer, Token, TokenType
@@ -57,6 +59,10 @@ def compile_source(source: str, *, org: int = 0x8000, stack: int = 0x00FF,
         Assembly text (str), S19 text (str), listing text (str),
         or raw bytes (bytes) depending on output.
     """
+    if not isinstance(source, str):
+        raise TypeError("source must be a string")
+    if output not in {"asm", "s19", "binary", "listing"}:
+        raise ValueError(f"Unsupported output format: {output!r}")
     lexer = Lexer(source)
     tokens = lexer.tokenize()
     parser = Parser(tokens, source)

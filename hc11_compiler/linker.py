@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence
 
 from .assembler import Assembler, AssemblerError
-from .objectfile import KCOS_ABI, ObjectSymbol, RelocatableObject, compile_object
+from .objectfile import KCOS_ABI, ObjectFormatError, ObjectSymbol, RelocatableObject, compile_object
 from .resource_map import Allocation, ResourceMap, ResourceMapError
 
 
@@ -40,6 +40,12 @@ def _validate_objects(objects: Sequence[RelocatableObject]) -> str:
     exports: Dict[str, tuple] = {}
 
     for obj in objects:
+        if not isinstance(obj, RelocatableObject):
+            raise LinkError("Expected a RelocatableObject")
+        try:
+            RelocatableObject.from_dict(obj.to_dict())
+        except (ObjectFormatError, TypeError, ValueError, KeyError, AttributeError) as exc:
+            raise LinkError(f"Invalid object: {exc}") from exc
         if obj.abi != KCOS_ABI:
             raise LinkError(
                 f"{obj.module}: ABI {obj.abi!r} does not match {KCOS_ABI!r}"
@@ -103,8 +109,8 @@ def _allocate_module_resources(objects: Sequence[RelocatableObject],
             try:
                 placement = resource_map.allocate(
                     str(req["kind"]),
-                    int(req["size"]),
-                    int(req.get("alignment", 1)),
+                    req["size"],
+                    req.get("alignment", 1),
                     placeholder,
                     module=obj.module,
                 )

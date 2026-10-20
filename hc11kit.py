@@ -35,10 +35,10 @@ import argparse
 import sys
 import os
 
-__version__ = "1.0.0"
+VY_V6_ROM_SIZE = 0x20000
 
-# Ensure our package is importable
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from hc11_compiler import __version__
+from hc11_compiler.cli import validate_command_outputs, write_command_output
 
 
 def main():
@@ -99,6 +99,12 @@ def main():
     p_pat.add_argument("--hook", default=None,
                         help="Hook point OFFSET:SIZE, e.g. 0x101E1:3 — replaces SIZE "
                              "bytes at OFFSET with JSR to injected code")
+    p_pat.add_argument("--expect-sha256", help="Required exact input hash for VY research images")
+    p_pat.add_argument("--expect-hook-bytes", help="Expected original hook bytes; required for VY hooks")
+    p_pat.add_argument("--allow-banked-target", action="store_true", help="Unqualified research override for banked placement")
+    p_pat.add_argument("--allow-nonfree", action="store_true", help="Unqualified research override for occupied/mixed fill")
+    p_pat.add_argument("--force-generic-checksum", action="store_true", help="Unqualified generic checksum override for VY")
+    p_pat.add_argument("--overwrite", dest="force", action="store_true", help="Alias of --force (preserved local variant CLI)")
     p_pat.add_argument("-o", "--output", help="Output patched binary (default: input_patched.bin)")
     p_pat.add_argument("--target", default="vy_v6",
                         choices=["generic", "vy_v6", "1227730", "16197427"])
@@ -128,7 +134,7 @@ def main():
                         help="Offset of stored checksum (default: 6)")
     p_cks.add_argument("--sum-offset", type=lambda x: int(x, 0), default=8,
                         help="Offset where summation begins (default: 8)")
-    p_cks.add_argument("-o", "--output", help="Output file (default: overwrite input when --fix)")
+    p_cks.add_argument("-o", "--output", help="Output file (default: input_checksum.bin when --fix)")
 
     # ── addr ─────────────────────────────────────────────────────────────
     p_addr = sub.add_parser("addr", help="Convert between file offset, CPU address, and bank")
@@ -151,6 +157,8 @@ def main():
     # ── info ─────────────────────────────────────────────────────────────
     p_info = sub.add_parser("info", help="Identify and summarize a binary file")
     p_info.add_argument("input", help="Input .bin file")
+    for child in (p_asm, p_dis, p_cc, p_pat, p_cks):
+        child.add_argument("--force", action="store_true", help="Replace an existing output; source inputs remain protected")
 
     # ── Parse and dispatch ───────────────────────────────────────────────
     args = parser.parse_args()
@@ -160,6 +168,7 @@ def main():
 
     # Import and dispatch to subcommand
     try:
+        validate_command_outputs(args)
         handler = COMMANDS[args.command]
         return handler(args)
     except KeyError:
@@ -192,6 +201,14 @@ def cmd_asm(args):
 
     with open(args.input, "r", encoding="utf-8") as f:
         source = f.read()
+    if args.org is not None:
+        import re
+        origin = _parse_hex(args.org)
+        if not 0 <= origin <= 0xFFFF:
+            raise ValueError("ORG must be in 0..0xFFFF")
+        source, count = re.subn(r"(?im)^\s*ORG\s+[^;\r\n]+", f"        ORG ${origin:04X}", source, count=1)
+        if not count:
+            source = f"        ORG ${origin:04X}\n" + source
 
     asm = Assembler()
     try:
@@ -207,14 +224,11 @@ def cmd_asm(args):
     out = args.output
     ext = os.path.splitext(out)[1].lower()
     if ext == ".s19":
-        with open(out, "w") as f:
-            f.write(asm.to_s19())
+        write_command_output(args, out, asm.to_s19())
     elif ext == ".lst":
-        with open(out, "w", encoding="utf-8") as f:
-            f.write(asm.get_listing())
+        write_command_output(args, out, asm.get_listing())
     else:  # .bin or anything else
-        with open(out, "wb") as f:
-            f.write(bytes(asm.binary))
+        write_command_output(args, out, bytes(asm.binary))
     print(f"Assembled {len(asm.binary)} bytes -> {out}")
 
 
@@ -232,9 +246,12 @@ def cmd_disasm(args):
         cpu_end = _parse_hex(parts[1]) if len(parts) > 1 else cpu_start + 64
         # Convert CPU to file offset based on format
         if args.format == "vy_v6_128k":
+            if cpu_start >= 0x8000 and args.bank is None:
+                raise ValueError("Banked CPU ranges require an explicit --bank")
             start_off, end_off, cpu_base = _cpu_to_file_range_vy(cpu_start, cpu_end, args.bank)
         else:
-            start_off, end_off = cpu_start, cpu_end
+            base = 0x8000 if args.format == "flat_32k" else 0
+            start_off, end_off = cpu_start - base, cpu_end - base
             cpu_base = cpu_start
     elif args.offset:
         parts = args.offset.replace("-", " ").split()
@@ -243,15 +260,26 @@ def cmd_disasm(args):
         if args.format == "vy_v6_128k":
             cpu_base = _file_to_cpu_vy(start_off)
         else:
-            cpu_base = start_off
+            cpu_base = start_off + (0x8000 if args.format == "flat_32k" else 0)
 
+    if args.range and args.offset:
+        raise ValueError("Choose --range or --offset, not both")
+    if args.format == "vy_v6_128k":
+        if len(data) != VY_V6_ROM_SIZE:
+            raise ValueError("VY layout requires exactly 128KB; choose a flat layout for other inputs")
+        if not args.range and not args.offset:
+            raise ValueError("VY disassembly requires an explicit range/offset within one memory window")
+        if end_off > start_off and _file_to_bank_vy(start_off) != _file_to_bank_vy(end_off - 1):
+            raise ValueError("Disassembly range crosses a VY memory-window boundary")
+
+    if not 0 <= start_off <= end_off <= len(data):
+        raise ValueError("Disassembly range must be within the input file")
     chunk = data[start_off:end_off]
     lines = _disassemble_bytes(chunk, cpu_base)
 
     output = "\n".join(lines)
     if args.output:
-        with open(args.output, "w", encoding="utf-8") as f:
-            f.write(output + "\n")
+        write_command_output(args, args.output, output + "\n")
         print(f"Disassembled {len(chunk)} bytes -> {args.output}")
     else:
         print(output)
@@ -288,10 +316,7 @@ def cmd_compile(args):
                             target=args.target, output=out_format)
 
     if args.output:
-        mode = "wb" if out_format == "binary" else "w"
-        enc = {} if out_format == "binary" else {"encoding": "utf-8"}
-        with open(args.output, mode, **enc) as f:
-            f.write(result)
+        write_command_output(args, args.output, result)
         size = len(result) if isinstance(result, (bytes, bytearray)) else len(result.encode())
         print(f"Compiled {args.input} -> {args.output} ({size} bytes)")
     else:
@@ -303,7 +328,11 @@ def cmd_compile(args):
 
 # ── patch ────────────────────────────────────────────────────────────────
 def cmd_patch(args):
-    import struct
+    import hashlib
+
+    if args.no_checksum and args.force_generic_checksum:
+        raise ValueError("Choose --no-checksum or --force-generic-checksum, not both")
+
     inject_offset = _parse_hex(args.at)
 
     # Load base binary
@@ -311,6 +340,71 @@ def cmd_patch(args):
         rom = bytearray(f.read())
     rom_size = len(rom)
     print(f"Base binary: {args.binary} ({rom_size} bytes)")
+
+    input_digest = hashlib.sha256(rom).hexdigest()
+    print(f"Input SHA256: {input_digest}")
+
+    if inject_offset < 0 or inject_offset >= rom_size:
+        raise ValueError(f"Injection offset 0x{inject_offset:X} is outside the binary")
+
+    expected_digest = _normalize_sha256(args.expect_sha256) if args.expect_sha256 else None
+    if args.target == "vy_v6":
+        if rom_size != VY_V6_ROM_SIZE:
+            raise ValueError(
+                f"VY target requires a 128KB binary ({VY_V6_ROM_SIZE} bytes), got {rom_size}"
+            )
+        if expected_digest is None:
+            raise ValueError(
+                "--expect-sha256 is required for VY patching; each OSID/enhanced variant can differ"
+            )
+        inject_bank = _file_to_bank_vy(inject_offset)
+        if inject_bank != "common" and not args.allow_banked_target:
+            raise ValueError(
+                f"VY injection offset 0x{inject_offset:05X} resolves to {inject_bank}. "
+                "A JSR does not prove the runtime overlay; use common ROM or the explicit "
+                "--allow-banked-target research override"
+            )
+
+    if expected_digest is not None and input_digest != expected_digest:
+        raise ValueError(
+            f"Input SHA256 mismatch: expected {expected_digest}, got {input_digest}"
+        )
+    if expected_digest is not None:
+        print("Input SHA256 matches expected variant")
+
+    hook_off = None
+    hook_size = None
+    original_hook = None
+    hook_data = None
+    if args.hook:
+        hook_off, hook_size = _parse_hook(args.hook)
+        if hook_size < 3:
+            raise ValueError(f"Hook size {hook_size} is too small for JSR (need at least 3)")
+        if hook_off < 0 or hook_off + hook_size > rom_size:
+            raise ValueError(
+                f"Hook range 0x{hook_off:05X}-0x{hook_off + hook_size - 1:05X} "
+                "is outside the binary"
+            )
+        original_hook = bytes(rom[hook_off:hook_off + hook_size])
+
+        if args.target == "vy_v6" and not args.expect_hook_bytes:
+            raise ValueError(
+                "--expect-hook-bytes is required for a VY hook; matching size or address is not enough"
+            )
+        if args.expect_hook_bytes:
+            expected_hook = _parse_expected_bytes(args.expect_hook_bytes)
+            if len(expected_hook) != hook_size:
+                raise ValueError(
+                    f"Expected hook byte count ({len(expected_hook)}) does not match hook size ({hook_size})"
+                )
+            if original_hook != expected_hook:
+                raise ValueError(
+                    f"Hook bytes mismatch at 0x{hook_off:05X}: expected "
+                    f"{expected_hook.hex().upper()}, got {original_hook.hex().upper()}"
+                )
+            print(f"Hook bytes match at 0x{hook_off:05X}: {original_hook.hex().upper()}")
+    elif args.expect_hook_bytes:
+        raise ValueError("--expect-hook-bytes requires --hook")
 
     # Determine code source format and get bytes
     code_path = args.code
@@ -335,11 +429,14 @@ def cmd_patch(args):
             asm_source = f.read()
         assembler = Assembler()
         assembler.assemble(asm_source)
+        cpu_origin = _file_to_cpu_vy(inject_offset) if args.target == "vy_v6" else inject_offset
+        if assembler.base_addr != cpu_origin:
+            raise ValueError("Assembly origin does not match injection CPU address")
         code_bytes = bytes(assembler.binary)
         print(f"Assembled {code_path} -> {len(code_bytes)} bytes")
 
     elif ext == ".s19":
-        code_bytes = _s19_to_bytes(code_path)
+        code_bytes = _s19_to_bytes(code_path, expected_origin=_file_to_cpu_vy(inject_offset) if args.target == "vy_v6" else inject_offset)
         print(f"Loaded S19 {code_path} -> {len(code_bytes)} bytes")
 
     else:  # .bin or raw
@@ -347,62 +444,106 @@ def cmd_patch(args):
             code_bytes = f.read()
         print(f"Loaded raw {code_path} -> {len(code_bytes)} bytes")
 
+    if not code_bytes:
+        raise ValueError("Code input is empty")
+
     # Validate injection fits
     if inject_offset + len(code_bytes) > rom_size:
-        print(f"ERROR: Code ({len(code_bytes)} bytes) doesn't fit at "
-              f"0x{inject_offset:05X} (binary ends at 0x{rom_size:05X})", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError(
+            f"Code ({len(code_bytes)} bytes) does not fit at 0x{inject_offset:05X} "
+            f"(binary ends at 0x{rom_size:05X})"
+        )
+
+    if args.target == "vy_v6":
+        start_bank = _file_to_bank_vy(inject_offset)
+        end_bank = _file_to_bank_vy(inject_offset + len(code_bytes) - 1)
+        if start_bank != end_bank:
+            raise ValueError("Injection crosses a VY memory-window boundary")
+
+    if hook_off is not None:
+        inject_end = inject_offset + len(code_bytes)
+        hook_end = hook_off + hook_size
+        if inject_offset < hook_end and hook_off < inject_end:
+            raise ValueError("Injection range overlaps the hook range")
 
     # Check target region is free space
     target_region = rom[inject_offset:inject_offset + len(code_bytes)]
-    non_free = sum(1 for b in target_region if b not in (0x00, 0xFF))
-    if non_free > 0:
-        print(f"WARNING: Target region 0x{inject_offset:05X}-0x{inject_offset+len(code_bytes):05X} "
-              f"has {non_free} non-free bytes (may be overwriting existing code)")
+    uniform_free = bool(target_region) and target_region[0] in (0x00, 0xFF)
+    uniform_free = uniform_free and all(byte == target_region[0] for byte in target_region)
+    if not uniform_free and not args.allow_nonfree:
+        sample = bytes(target_region[:16]).hex().upper()
+        raise ValueError(
+            f"Target region 0x{inject_offset:05X}-0x{inject_offset + len(code_bytes) - 1:05X} "
+            f"is not uniform 00/FF fill (first bytes: {sample}); use --allow-nonfree only "
+            "for reviewed local research"
+        )
+    if uniform_free:
+        print(
+            f"Target region is uniform {target_region[0]:02X} fill: "
+            f"0x{inject_offset:05X}-0x{inject_offset + len(code_bytes) - 1:05X}"
+        )
+    else:
+        print("WARNING: --allow-nonfree permits overwriting occupied or mixed-fill bytes")
+
+    cpu_target = _file_to_cpu_vy(inject_offset) if args.target == "vy_v6" else inject_offset
+    if cpu_target < 0 or cpu_target > 0xFFFF:
+        raise ValueError(f"JSR target 0x{cpu_target:X} is outside the HC11 16-bit address space")
+
+    if hook_off is not None:
+        jsr_bytes = bytes([0xBD, (cpu_target >> 8) & 0xFF, cpu_target & 0xFF])
+        hook_data = jsr_bytes + bytes([0x01] * (hook_size - 3))
 
     if args.dry_run:
         print(f"\n[DRY RUN] Would inject {len(code_bytes)} bytes at file 0x{inject_offset:05X}")
-        if args.hook:
-            hook_off, hook_size = _parse_hook(args.hook)
+        if hook_off is not None:
             print(f"[DRY RUN] Would write hook at file 0x{hook_off:05X} ({hook_size} bytes)")
+        if args.target == "vy_v6" and not args.force_generic_checksum:
+            print("[DRY RUN] VY checksum would be left unchanged (generic algorithm is unverified)")
         print("[DRY RUN] No files modified.")
         return
+
+    out_path = args.output or _patched_name(args.binary)
+    input_abs = os.path.abspath(args.binary)
+    output_abs = os.path.abspath(out_path)
+    if os.path.normcase(input_abs) == os.path.normcase(output_abs):
+        raise ValueError("Output path must not be the input binary")
+    if os.path.exists(out_path) and not args.force:
+        raise ValueError(f"Output already exists: {out_path}; use --force to replace it")
 
     # Write code into ROM
     rom[inject_offset:inject_offset + len(code_bytes)] = code_bytes
     print(f"Injected {len(code_bytes)} bytes at file offset 0x{inject_offset:05X}")
 
     # Install hook if requested
-    if args.hook:
-        hook_off, hook_size = _parse_hook(args.hook)
-        # Save original bytes
-        original = bytes(rom[hook_off:hook_off + hook_size])
-
-        # Calculate JSR target CPU address
-        cpu_target = _file_to_cpu_vy(inject_offset) if args.target == "vy_v6" else inject_offset
-        # JSR extended = BD xx xx (3 bytes)
-        jsr_bytes = bytes([0xBD, (cpu_target >> 8) & 0xFF, cpu_target & 0xFF])
-
-        if hook_size < 3:
-            print(f"ERROR: Hook size {hook_size} too small for JSR (need 3)", file=sys.stderr)
-            sys.exit(1)
-
-        # Pad with NOPs if hook replaces more than 3 bytes
-        hook_data = jsr_bytes + bytes([0x01] * (hook_size - 3))  # 0x01 = NOP
+    if hook_off is not None:
         rom[hook_off:hook_off + hook_size] = hook_data
 
-        print(f"Hook at 0x{hook_off:05X}: {original.hex().upper()} -> {hook_data.hex().upper()}"
+        print(f"Hook at 0x{hook_off:05X}: {original_hook.hex().upper()} -> {hook_data.hex().upper()}"
               f" (JSR ${cpu_target:04X})")
 
-    # Fix checksum unless told not to
-    if not args.no_checksum:
+    # The generic checksum implementation is not validated for VY $060A images.
+    if args.no_checksum:
+        print("Checksum skipped by --no-checksum")
+    elif args.target == "vy_v6" and not args.force_generic_checksum:
+        print("Checksum left unchanged: generic GM16 checksum is not validated for VY $060A")
+    else:
+        if args.target == "vy_v6":
+            print("WARNING: forcing the unverified generic checksum algorithm for VY")
         _fix_checksum_inplace(rom)
 
     # Write output
-    out_path = args.output or _patched_name(args.binary)
-    with open(out_path, "wb") as f:
-        f.write(rom)
+    write_command_output(args, out_path, rom)
     print(f"Patched binary written to {out_path}")
+
+    with open(out_path, "rb") as f:
+        written = f.read()
+    if written != bytes(rom):
+        raise RuntimeError("Readback verification failed for complete output image")
+    if written[inject_offset:inject_offset + len(code_bytes)] != code_bytes:
+        raise RuntimeError("Readback verification failed for injected code")
+    if hook_off is not None and written[hook_off:hook_off + hook_size] != hook_data:
+        raise RuntimeError("Readback verification failed for hook bytes")
+    print(f"Output SHA256: {hashlib.sha256(written).hexdigest()}")
 
     # Verify readback
     if args.verify:
@@ -415,6 +556,8 @@ def cmd_patch(args):
 
 # ── free ─────────────────────────────────────────────────────────────────
 def cmd_free(args):
+    if args.min_size <= 0 or (args.fill is not None and not 0 <= args.fill <= 255):
+        raise ValueError("Minimum size must be positive and fill must be a byte (0..255)")
     with open(args.input, "rb") as f:
         data = f.read()
 
@@ -487,8 +630,7 @@ def cmd_checksum(args):
             import struct
             struct.pack_into(">H", data, args.chk_offset, calculated)
             out_path = args.output or args.input
-            with open(out_path, "wb") as f:
-                f.write(data)
+            write_command_output(args, out_path, data)
             print(f"Fixed:      Wrote 0x{calculated:04X} to {out_path}")
         else:
             print("Use --fix to correct the checksum")
@@ -497,6 +639,9 @@ def cmd_checksum(args):
 # ── addr ─────────────────────────────────────────────────────────────────
 def cmd_addr(args):
     addr = _parse_hex(args.address)
+    limit = (0x20000 if args.format == "vy_v6_128k" else 0x8000 if args.format == "flat_32k" else 0x10000) if args.from_type == "file" else 0x10000
+    if not 0 <= addr < limit:
+        raise ValueError("Address is outside the selected layout")
 
     if args.format == "vy_v6_128k":
         if args.from_type == "file":
@@ -511,7 +656,9 @@ def cmd_addr(args):
                 print(f"  Bank 2 file: 0x{0x10000 + (cpu - 0x8000):05X}")
                 print(f"  Bank 3 file: 0x{0x18000 + (cpu - 0x8000):05X}")
         else:  # cpu
-            bank = args.bank or "2"  # default bank 2 (engine code)
+            if addr >= 0x8000 and (args.bank is None or args.bank == "common"):
+                raise ValueError("Banked CPU addresses require --bank 1, 2, or 3")
+            bank = args.bank or "common"
             file_off = _cpu_to_file_vy(addr, bank)
             print(f"CPU address:  ${addr:04X}")
             print(f"Bank:         {bank}")
@@ -520,6 +667,11 @@ def cmd_addr(args):
                 print(f"  Bank 1 file: 0x{0x08000 + (addr - 0x8000):05X}")
                 print(f"  Bank 2 file: 0x{0x10000 + (addr - 0x8000):05X}")
                 print(f"  Bank 3 file: 0x{0x18000 + (addr - 0x8000):05X}")
+    elif args.format == "flat_32k":
+        if args.from_type == "cpu" and addr < 0x8000:
+            raise ValueError("32KB layout CPU addresses begin at 0x8000")
+        converted = addr + 0x8000 if args.from_type == "file" else addr - 0x8000
+        print(f"Converted address: 0x{converted:04X}")
     else:
         print(f"Address: 0x{addr:05X} (flat mapping, no conversion needed)")
 
@@ -567,10 +719,12 @@ def cmd_info(args):
     print(f"File:     {args.input}")
     print(f"Size:     {size} bytes ({size//1024} KB)")
     print(f"MD5:      {md5}")
+    print(f"SHA256:   {hashlib.sha256(data).hexdigest()}")
+    print("Size/layout hints below do not identify engine, OS, calibration or compatibility.")
 
     # Identify format
     if size == 131072:
-        fmt = "128KB (VY V6 / VT-VX compatible)"
+        fmt = "128KB size only; candidate VY layout requires independent identification"
         print(f"Format:   {fmt}")
         # Check reset vector
         reset_vec = (data[0x1FFFE] << 8) | data[0x1FFFF]
@@ -582,15 +736,15 @@ def cmd_info(args):
         stored = _read_checksum(data, 6)
         calculated = _calc_checksum(data, 8)
         status = "VALID" if stored == calculated else f"MISMATCH (stored=0x{stored:04X} calc=0x{calculated:04X})"
-        print(f"Checksum: {status}")
+        print(f"Generic GM16 arithmetic: {status} (unqualified for this image)")
         # Free space summary
         free_00 = _count_free(data, 0x00, 64)
         free_ff = _count_free(data, 0xFF, 64)
-        print(f"Free space: {free_00:,} bytes (0x00 fill), {free_ff:,} bytes (0xFF fill)")
+        print(f"Uniform fill candidates: {free_00:,} bytes (0x00), {free_ff:,} bytes (0xFF); ownership not proven")
     elif size == 262144:
-        print("Format:   256KB (LS1 / V8 compatible)")
+        print("Format:   256KB size; architecture/OS unknown")
     elif size == 524288:
-        print("Format:   512KB (BMW MS42/MS43 style)")
+        print("Format:   512KB size; architecture/OS unknown")
     elif size == 32768:
         print("Format:   32KB (1227730 style, flat)")
     elif size == 65536:
@@ -993,6 +1147,8 @@ def _calc_checksum(data, sum_offset=8):
     The checksum is the truncated sum of all bytes from a starting offset
     (typically 8) through the end of the file.
     """
+    if type(sum_offset) is not int or not 0 <= sum_offset <= len(data):
+        raise ValueError("Checksum summation offset is outside the input")
     checksum = 0
     for b in data[sum_offset:]:
         checksum = (checksum + b) & 0xFFFF
@@ -1000,6 +1156,8 @@ def _calc_checksum(data, sum_offset=8):
 
 def _read_checksum(data, chk_offset=6):
     """Read stored 16-bit big-endian checksum."""
+    if type(chk_offset) is not int or not 0 <= chk_offset <= len(data) - 2:
+        raise ValueError("Stored checksum requires two bytes inside the input")
     import struct
     return struct.unpack(">H", bytes(data[chk_offset:chk_offset + 2]))[0]
 
@@ -1049,21 +1207,57 @@ def _parse_hook(hook_str):
     size = int(parts[1]) if len(parts) > 1 else 3
     return offset, size
 
+def _normalize_sha256(value):
+    """Normalize and validate a SHA256 supplied on the command line."""
+    import re
+    digest = value.strip().lower()
+    if digest.startswith("sha256:"):
+        digest = digest[7:]
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("--expect-sha256 must contain exactly 64 hexadecimal characters")
+    return digest
+
+
+def _parse_expected_bytes(value):
+    """Parse human-friendly hex bytes such as 'FD017B' or 'FD 01 7B'."""
+    import re
+    cleaned = re.sub(r"(?i)0x", "", value)
+    cleaned = re.sub(r"\s+", "", cleaned)
+    if not re.fullmatch(r"(?:[0-9a-fA-F]{2})+", cleaned):
+        raise ValueError("Expected bytes must contain a whole number of hexadecimal bytes")
+    return bytes.fromhex(cleaned)
+
+
 def _patched_name(path):
     """Generate patched output filename."""
     base, ext = os.path.splitext(path)
     return f"{base}_patched{ext}"
 
-def _s19_to_bytes(path):
-    """Load Motorola S19 and extract raw bytes."""
+def _s19_to_bytes(path, expected_origin=None):
+    """Read checksum-validated, contiguous S1 data without losing addresses."""
     data = bytearray()
-    with open(path, "r") as f:
-        for line in f:
+    next_address = expected_origin
+    with open(path, "r", encoding="ascii") as f:
+        for number, line in enumerate(f, 1):
             line = line.strip()
+            if not line:
+                continue
+            if not line.startswith(("S0", "S1", "S9")):
+                raise ValueError(f"S19 line {number}: only S0/S1/S9 records are supported")
+            record = bytes.fromhex(line[2:])
+            if not record or record[0] < 3 or len(record) != record[0] + 1 or sum(record) & 255 != 255:
+                raise ValueError(f"S19 line {number}: invalid count or checksum")
             if line.startswith("S1"):
-                count = int(line[2:4], 16)
-                payload = bytes.fromhex(line[8:8 + (count - 3) * 2])
+                address = int.from_bytes(record[1:3], "big")
+                payload = record[3:-1]
+                if next_address is not None and address != next_address:
+                    raise ValueError(f"S19 line {number}: noncontiguous or mismatched address")
+                next_address = address + len(payload)
+                if next_address > 0x10000:
+                    raise ValueError(f"S19 line {number}: exceeds 16-bit address space")
                 data.extend(payload)
+    if not data:
+        raise ValueError("S19 contains no S1 data")
     return bytes(data)
 
 
