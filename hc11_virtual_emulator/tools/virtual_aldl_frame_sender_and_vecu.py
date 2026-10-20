@@ -75,7 +75,6 @@ except ImportError:
 
 # ── Logging Setup (merged from log_setup.py — same pattern as kingai_commie_flasher.py) ──
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 try:
     from rich.logging import RichHandler
@@ -148,7 +147,7 @@ def setup_logging(
     return logger
 
 
-log = setup_logging()
+log = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════
 # CONSTANTS
@@ -1019,6 +1018,7 @@ def interactive_mode(serial_port: str, baud: int = ALDL_BAUD):
 # ═══════════════════════════════════════════════════════════════════════
 
 def main():
+    global log
     parser = argparse.ArgumentParser(
         description="Virtual ALDL ECU + Frame Sender",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1060,8 +1060,7 @@ Examples:
                         help="Enable verbose debug logging")
     args = parser.parse_args()
 
-    # Reconfigure logger with user-requested console level
-    global log
+    # Configure file logging only after explicit CLI execution.
     console_level = logging.DEBUG if args.verbose else logging.WARNING
     log = setup_logging(name="vecu", console_level=console_level)
 

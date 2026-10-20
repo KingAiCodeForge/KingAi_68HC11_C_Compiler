@@ -63,6 +63,7 @@ def test_imports():
         assert r.A == 0xAB and r.B == 0xCD
         print(f"    ✓ Register D split/join")
     except Exception as e:
+        results.append(("Smoke test", f"FAIL: {e}"))
         print(f"    ✗ Register D: {e}")
     
     try:
@@ -80,6 +81,7 @@ def test_imports():
         assert flags & CC_N, "sub8(0,1) should set N"
         print(f"    ✓ ALU sub8 with borrow")
     except Exception as e:
+        results.append(("Smoke test", f"FAIL: {e}"))
         print(f"    ✗ ALU: {e}")
     
     try:
@@ -96,6 +98,7 @@ def test_imports():
         assert mem.read8(0x8000) == 0x42, "ROM write protection failed"
         print(f"    ✓ Memory read/write + ROM protection")
     except Exception as e:
+        results.append(("Smoke test", f"FAIL: {e}"))
         print(f"    ✗ Memory: {e}")
     
     try:
@@ -110,6 +113,7 @@ def test_imports():
         assert sci.sci_output == b'HI', f"SCI output: {sci.sci_output!r}"
         print(f"    ✓ SCI transmit (ALDL TX)")
     except Exception as e:
+        results.append(("Smoke test", f"FAIL: {e}"))
         print(f"    ✗ SCI: {e}")
     
     try:
@@ -122,6 +126,7 @@ def test_imports():
         assert validate_checksum(raw), f"Checksum invalid: {raw.hex()}"
         print(f"    ✓ Mode 4 frame build + checksum")
     except Exception as e:
+        results.append(("Smoke test", f"FAIL: {e}"))
         print(f"    ✗ Mode 4: {e}")
     
     try:
@@ -134,6 +139,7 @@ def test_imports():
         assert mnem == 'LDAA' and mode == 'IMM8'
         print(f"    ✓ Opcode decoder ({total} opcodes loaded, LDAA #$42 decodes OK)")
     except Exception as e:
+        results.append(("Smoke test", f"FAIL: {e}"))
         print(f"    ✗ Decoder: {e}")
     
     print("\n" + "─" * 50)
@@ -143,13 +149,12 @@ def test_imports():
         print(f"  {len(failed)} module(s) FAILED to import:")
         for name, status in failed:
             print(f"    ✗ {name}: {status}")
-        return False
+        raise AssertionError(f"{len(failed)} scaffold import/smoke checks failed")
     else:
         print(f"  All {len(results)} scaffold modules imported successfully.")
         print(f"  All smoke tests passed.")
-        return True
+        return None
 
 
 if __name__ == '__main__':
-    success = test_imports()
-    sys.exit(0 if success else 1)
+    test_imports()

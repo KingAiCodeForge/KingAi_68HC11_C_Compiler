@@ -1,15 +1,34 @@
+#!/usr/bin/env python3
+"""Report duplicate scalar addresses from an explicitly supplied XDF JSON export."""
+import argparse
 import json
 from collections import Counter
+from pathlib import Path
 
-d = json.load(open("Enhanced_v1.json"))
-addrs = [s["address"] for s in d["scalars"] if s.get("address")]
-dupes = [(a,c) for a,c in Counter(addrs).items() if c > 1]
-print(f"Duplicate scalar addresses: {len(dupes)}")
-for addr, cnt in dupes[:5]:
-    items = [s for s in d["scalars"] if s.get("address") == addr]
-    print(f"  {addr}: {cnt} entries")
-    for s in items:
-        t = s.get("title","")[:60]
-        v = s.get("value","")
-        u = s.get("unit","")
-        print(f"    - {t} = {v} {u}")
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('json', type=Path)
+    args = parser.parse_args(argv)
+    try:
+        data = json.loads(args.json.read_text(encoding='utf-8-sig'))
+        scalars = data['scalars']
+        if not isinstance(scalars, list) or any(not isinstance(s, dict) for s in scalars):
+            raise ValueError('scalars must be a list of objects')
+        addresses = [s['address'] for s in scalars if s.get('address')]
+        if any(not isinstance(a, (str, int)) for a in addresses):
+            raise ValueError('scalar addresses must be strings or integers')
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        parser.error(str(exc))
+    duplicates = sorted((str(a), count) for a, count in Counter(addresses).items() if count > 1)
+    print(f'Duplicate scalar addresses: {len(duplicates)}')
+    for addr, count in duplicates[:5]:
+        print(f'  {addr}: {count} entries')
+        for item in scalars:
+            if str(item.get('address')) == addr:
+                print(f"    - {str(item.get('title', ''))[:60]} = {item.get('value', '')} {item.get('unit', '')}")
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

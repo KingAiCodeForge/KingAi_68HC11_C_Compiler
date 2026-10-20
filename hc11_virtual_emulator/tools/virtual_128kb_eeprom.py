@@ -39,7 +39,6 @@ from typing import Optional, List, Tuple
 
 # ── Logging Setup (merged from ignore/log_setup.py — same pattern as kingai_commie_flasher.py) ──
 LOG_DIR = Path(__file__).resolve().parent / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 try:
     from rich.logging import RichHandler
@@ -112,7 +111,7 @@ def setup_logging(
     return logger
 
 
-log = setup_logging()
+log = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════
 # CONSTANTS

@@ -9,7 +9,7 @@ Date: January 19, 2026
 
 import json
 import csv
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 import logging
@@ -21,7 +21,8 @@ class OutputManager:
     def __init__(self, 
                  base_dir: Union[str, Path] = ".",
                  timestamp: bool = True,
-                 create_subdirs: bool = True):
+                 create_subdirs: bool = True,
+                 overwrite: bool = False):
         """
         Initialize output manager
         
@@ -29,10 +30,12 @@ class OutputManager:
             base_dir: Base directory for all outputs
             timestamp: Add timestamps to filenames
             create_subdirs: Create subdirectories by category
+            overwrite: Explicitly allow replacing existing output files
         """
-        self.base_dir = Path(base_dir)
+        self.base_dir = Path(base_dir).resolve()
         self.timestamp = timestamp
         self.create_subdirs = create_subdirs
+        self.overwrite = overwrite
         self.logger = logging.getLogger(__name__)
         
         # Create base directory
@@ -88,11 +91,27 @@ class OutputManager:
         Returns:
             Full path to output file
         """
+        # A filename is one component on every platform, including when a
+        # Windows-looking path is passed on POSIX. Directories belong in subdir.
+        if (not isinstance(filename, str) or not filename or
+                filename in {'.', '..'} or '/' in filename or '\\' in filename or
+                PureWindowsPath(filename).drive or ':' in filename):
+            raise ValueError('filename must be a single relative filename')
+        output_dir = self.base_dir
         if self.create_subdirs and subdir:
-            output_dir = self.base_dir / subdir
-            output_dir.mkdir(parents=True, exist_ok=True)
-            return output_dir / filename
-        return self.base_dir / filename
+            raw_subdir = str(subdir).replace('\\', '/')
+            relative_dir = Path(raw_subdir)
+            if relative_dir.is_absolute() or PureWindowsPath(raw_subdir).drive:
+                raise ValueError('subdir must be relative to base_dir')
+            output_dir = self.base_dir / relative_dir
+        output_path = (output_dir / filename).resolve()
+        if not output_path.is_relative_to(self.base_dir):
+            raise ValueError('output path must remain inside base_dir')
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        return output_path
+
+    def _text_mode(self) -> str:
+        return 'w' if self.overwrite else 'x'
     
     def write_text(self,
                   content: str,
@@ -113,7 +132,7 @@ class OutputManager:
         """
         output_path = self.get_output_path(filename, subdir)
         
-        with open(output_path, 'w', encoding=encoding) as f:
+        with open(output_path, self._text_mode(), encoding=encoding) as f:
             f.write(content)
         
         self.files_written += 1
@@ -141,8 +160,8 @@ class OutputManager:
         """
         output_path = self.get_output_path(filename, subdir)
         
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=indent, ensure_ascii=False)
+        with open(output_path, self._text_mode(), encoding='utf-8') as f:
+            json.dump(data, f, indent=indent, ensure_ascii=False, sort_keys=True)
         
         self.files_written += 1
         self.bytes_written += output_path.stat().st_size
@@ -175,7 +194,7 @@ class OutputManager:
         if fieldnames is None:
             fieldnames = list(data[0].keys())
         
-        with open(output_path, 'w', encoding='utf-8', newline='') as f:
+        with open(output_path, self._text_mode(), encoding='utf-8', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(data)
@@ -207,7 +226,7 @@ class OutputManager:
         """
         output_path = self.get_output_path(filename, subdir)
         
-        with open(output_path, 'w', encoding='utf-8') as f:
+        with open(output_path, self._text_mode(), encoding='utf-8') as f:
             # Add frontmatter if provided
             if metadata or title:
                 f.write("---\n")
@@ -245,7 +264,7 @@ class OutputManager:
         """
         output_path = self.get_output_path(filename, subdir)
         
-        with open(output_path, 'wb') as f:
+        with open(output_path, 'wb' if self.overwrite else 'xb') as f:
             f.write(data)
         
         self.files_written += 1

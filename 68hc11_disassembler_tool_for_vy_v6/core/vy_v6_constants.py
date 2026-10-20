@@ -50,13 +50,13 @@ BINARY_PATH = next(
 )
 
 # Stock binary for comparison
-STOCK_BINARY_PATH = Path(r"R:\VY_V6_Assembly_Modding\VX-VY_V6_$060A_Stock.bin")
+STOCK_BINARY_PATH = Path(os.environ.get("VY_STOCK_BINARY", str(_SCRIPT_DIR.parent.parent / "VX-VY_V6_$060A_Stock.bin")))
 
 # XDF files
-XDF_PATH = Path(r"R:\VY_V6_Assembly_Modding\xdf_analysis\v2.09a")
+XDF_PATH = Path(os.environ.get("VY_XDF_DIR", str(_SCRIPT_DIR.parent.parent / "xdf_analysis" / "v2.09a")))
 
 # Output directory
-OUTPUT_DIR = Path(r"R:\VY_V6_Assembly_Modding\reports")
+OUTPUT_DIR = Path(os.environ.get("VY_OUTPUT_DIR", str(Path.cwd() / "reports")))
 
 # ============================================================================
 # HARDWARE SPECIFICATIONS (HC11F-family — 68HC11FC0 per DARC/IDA Pro)
