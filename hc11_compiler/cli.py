@@ -42,11 +42,26 @@ def command_inputs(args):
 
 def write_output(path, data, *, inputs=(), force=False):
     """Exclusive by default; explicit replacement never truncates link targets."""
+    if not isinstance(data, (str, bytes, bytearray)):
+        raise TypeError("output data must be str, bytes or bytearray")
     validate_outputs(inputs, [path], force=force)
     payload = data.encode("utf-8") if isinstance(data, str) else data
     if not force:
-        with open(path, "xb") as stream:
-            stream.write(payload)
+        identity = None
+        try:
+            with open(path, "xb") as stream:
+                created = os.fstat(stream.fileno())
+                identity = (created.st_dev, created.st_ino)
+                stream.write(payload)
+        except BaseException:
+            if identity is not None:
+                try:
+                    current = os.stat(path, follow_symlinks=False)
+                    if (current.st_dev, current.st_ino) == identity:
+                        os.unlink(path)
+                except OSError:
+                    pass  # Retain original failure; externally replaced paths stay intact.
+            raise
         return
     temporary = None
     try:

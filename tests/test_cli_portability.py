@@ -201,3 +201,34 @@ def test_force_output_replaces_file_without_touching_source(tmp_path):
     write_output(output, "candidate", inputs=[source], force=True)
     assert output.read_bytes() == b"candidate"
     assert source.read_bytes() == b"original"
+
+
+def test_invalid_writer_payload_creates_no_file(tmp_path):
+    output = tmp_path / "output"
+    with pytest.raises(TypeError, match="output data"):
+        write_output(output, object())
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("failure", ["write", "close"])
+def test_failed_exclusive_writer_removes_own_partial_file(tmp_path, monkeypatch, failure):
+    import builtins
+    output = tmp_path / "output"
+    original_open = builtins.open
+    class FailingWriter:
+        def __init__(self, stream): self.stream = stream
+        def __enter__(self): return self
+        def fileno(self): return self.stream.fileno()
+        def write(self, data):
+            self.stream.write(data[:1])
+            if failure == "write": raise OSError("synthetic write failure")
+        def __exit__(self, *exc):
+            self.stream.close()
+            if failure == "close": raise OSError("synthetic close failure")
+    def failing_open(path, mode="r", *args, **kwargs):
+        stream = original_open(path, mode, *args, **kwargs)
+        return FailingWriter(stream) if mode == "xb" and Path(path) == output else stream
+    monkeypatch.setattr(builtins, "open", failing_open)
+    with pytest.raises(OSError, match="synthetic"):
+        write_output(output, b"candidate")
+    assert not output.exists()
