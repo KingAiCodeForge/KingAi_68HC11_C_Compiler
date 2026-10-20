@@ -23,17 +23,8 @@ import argparse
 import sys
 import os
 
-# Fix stdout encoding on Windows (box-drawing chars in assembly comments)
-if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
-    try:
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    except AttributeError:
-        pass  # Python < 3.7
-
-# Allow running from project root or as module
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from hc11_compiler import compile_source
+from hc11_compiler import compile_source, __version__
+from hc11_compiler.cli import validate_command_outputs, write_command_output
 from hc11_compiler.lexer import Lexer, LexerError
 from hc11_compiler.parser import Parser, ParseError
 from hc11_compiler.codegen import CodeGenError, TARGET_PROFILES
@@ -51,6 +42,9 @@ def parse_int_arg(value: str) -> int:
 
 
 def main():
+    if sys.stdout.encoding and sys.stdout.encoding.lower() not in ('utf-8', 'utf8'):
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     parser = argparse.ArgumentParser(
         prog="hc11cc",
         description="KingAI 68HC11 C Compiler for Delco PCMs",
@@ -58,6 +52,7 @@ def main():
     )
     parser.add_argument("input", help="Input C source file")
     parser.add_argument("-o", "--output", help="Output assembly file (default: stdout)")
+    parser.add_argument("--force", action="store_true", help="Replace an existing output; source inputs remain protected")
     parser.add_argument("--target", default="generic",
                         choices=list(TARGET_PROFILES.keys()),
                         help="Target PCM profile (default: generic)")
@@ -72,7 +67,7 @@ def main():
     parser.add_argument("--ast", action="store_true",
                         help="Dump AST and exit (debug)")
     parser.add_argument("--version", action="version",
-                        version="hc11cc 0.3.0 (KingAI)")
+                        version=f"hc11cc {__version__} (KingAI)")
     parser.add_argument("--format", choices=["asm", "s19", "bin", "listing"],
                         default=None,
                         help="Output format (auto-detected from -o extension if not set)")
@@ -86,14 +81,18 @@ def main():
     except FileNotFoundError:
         print(f"Error: File not found: {args.input}", file=sys.stderr)
         sys.exit(1)
-    except IOError as e:
+    except (OSError, UnicodeError) as e:
         print(f"Error reading {args.input}: {e}", file=sys.stderr)
         sys.exit(1)
 
     # Determine org and stack from target profile, allow CLI overrides
     profile = TARGET_PROFILES.get(args.target, TARGET_PROFILES["generic"])
-    org = parse_int_arg(args.org) if args.org else profile["org"]
-    stack = parse_int_arg(args.stack) if args.stack else profile["stack"]
+    try:
+        org = parse_int_arg(args.org) if args.org else profile["org"]
+        stack = parse_int_arg(args.stack) if args.stack else profile["stack"]
+        validate_command_outputs(args)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
 
     if args.verbose:
         print(f"[hc11cc] Input:  {args.input}", file=sys.stderr)
@@ -121,7 +120,7 @@ def main():
 
         # Determine output format from --format flag, file extension, or default to asm
         if args.format:
-            out_format = args.format
+            out_format = 'binary' if args.format == 'bin' else args.format
         elif args.output:
             ext = os.path.splitext(args.output)[1].lower()
             if ext == '.s19':
@@ -141,14 +140,10 @@ def main():
 
         # Write output
         if args.output:
-            if out_format == 'binary':
-                with open(args.output, "wb") as f:
-                    f.write(result)
-            else:
-                with open(args.output, "w", encoding="utf-8") as f:
-                    f.write(result)
-                    if not result.endswith('\n'):
-                        f.write("\n")
+            payload = result
+            if isinstance(payload, str) and not payload.endswith('\n'):
+                payload += '\n'
+            write_command_output(args, args.output, payload)
             if args.verbose:
                 print(f"[hc11cc] Output: {args.output} ({out_format})", file=sys.stderr)
                 if out_format in ('binary', 's19'):
@@ -177,6 +172,9 @@ def main():
         sys.exit(1)
     except AssemblerError as e:
         print(f"Assembler error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except (OSError, ValueError) as e:
+        print(f"Input/output error: {e}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
         print(f"Internal compiler error: {e}", file=sys.stderr)

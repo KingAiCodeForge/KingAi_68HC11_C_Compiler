@@ -46,7 +46,7 @@ class TestBasicCompilation:
         assert "LDAA    #$2A" in asm
 
     def test_existing_examples_compile(self):
-        """All example files should compile without exceptions."""
+        """Self-contained examples compile; includes must fail explicitly."""
         import os
         examples_dir = os.path.join(os.path.dirname(__file__), "..", "examples")
         if os.path.isdir(examples_dir):
@@ -54,8 +54,12 @@ class TestBasicCompilation:
                 if fname.endswith(".c"):
                     with open(os.path.join(examples_dir, fname), encoding='utf-8') as f:
                         src = f.read()
-                    # Should not raise
-                    _compile(src)
+                    if "#include" in src:
+                        from hc11_compiler.lexer import LexerError
+                        with pytest.raises(LexerError, match="preprocessor"):
+                            _compile(src)
+                    else:
+                        _compile(src)
 
 
 # ─── 8-bit Arithmetic ─────────────────────
@@ -135,17 +139,18 @@ class TestArithmetic16Bit:
 
 class TestPointerDeref:
     def test_volatile_direct_read(self):
-        """*(volatile unsigned char *)0x1030 should emit LDAA $1030."""
+        """Volatile read reaches the exact address through the Y-frame ABI."""
         asm = _compile("""
         void f() {
             unsigned char x;
             x = *((volatile unsigned char *)0x1030);
         }
         """)
-        assert "LDAA    $1030" in asm
+        assert "LDD     #$1030\n        XGDX\n        LDAA    0,X" in asm
+        assert "LDAA    0,X" in asm
 
     def test_volatile_direct_write(self):
-        """*(volatile unsigned char *)0x1030 = val should emit STAA $1030."""
+        """Volatile write reaches the exact address through the Y-frame ABI."""
         asm = _compile("""
         void f() {
             unsigned char x;
@@ -153,7 +158,9 @@ class TestPointerDeref:
             *((volatile unsigned char *)0x1030) = x;
         }
         """)
-        assert "STAA    $1030" in asm
+        assert "LDD     #$1030" in asm
+        assert "XGDX" in asm
+        assert "STAA    0,X" in asm
 
     def test_no_tab_clra_xgdx_in_deref_store(self):
         """The old pointer corruption bug: TAB+CLRA before XGDX is gone."""
@@ -311,7 +318,8 @@ class TestTargetProfiles:
         asm = _compile("void main() {}", target="vy_v6")
         assert "VY V6" in asm
 
-    def test_unknown_target_falls_back(self):
-        """Unknown target should fall back to generic without crashing."""
-        asm = _compile("void main() {}", target="nonexistent")
-        assert "main:" in asm
+    def test_unknown_target_rejected(self):
+        """A misspelled target must not silently select another memory model."""
+        from hc11_compiler.codegen import CodeGenError
+        with pytest.raises(CodeGenError, match="Unknown target"):
+            _compile("void main() {}", target="nonexistent")

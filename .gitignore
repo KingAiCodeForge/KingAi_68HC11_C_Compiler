@@ -22,8 +22,7 @@ venv/
 htmlcov/
 .coverage
 
-# Dev-only audit/count scripts (underscore-prefixed = not for release)
-tests/_*.py
+# Audit scripts are eligible source after individual review; no filename-only exclusion.
 
 # Compiled binary output (test artifacts)
 *.bin
@@ -60,3 +59,17 @@ tests/test_sparkcut.asm
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# Local credentials, machine settings and private/customer firmware stay private
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.pfx
+*.p12
+credentials*.json
+secrets*.json
+private/
+customer_data/
+local-config.*

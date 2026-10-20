@@ -445,18 +445,24 @@ _op('BSR', REL, 0x8D, 2)
 # These have special encoding, handled separately in the assembler.
 # DIR: opcode, direct_addr, mask, rel_offset  (4 bytes)
 # IDX: opcode, index_offset, mask, rel_offset (4 bytes)
+# IDY: $18, opcode, index_offset, mask, rel_offset (5 bytes)
 _op('BRSET', DIR, 0x12, 4)
 _op('BRSET', IDX, 0x1E, 4)
+_opy('BRSET', IDY, 0x1E, 5)
 _op('BRCLR', DIR, 0x13, 4)
 _op('BRCLR', IDX, 0x1F, 4)
+_opy('BRCLR', IDY, 0x1F, 5)
 
 # ── BSET / BCLR — 2-operand bit manipulation (direct + mask) ──
 # DIR: opcode, direct_addr, mask  (3 bytes)
 # IDX: opcode, index_offset, mask (3 bytes)
+# IDY: $18, opcode, index_offset, mask (4 bytes)
 _op('BSET', DIR, 0x14, 3)
 _op('BSET', IDX, 0x1C, 3)
+_opy('BSET', IDY, 0x1C, 4)
 _op('BCLR', DIR, 0x15, 3)
 _op('BCLR', IDX, 0x1D, 3)
+_opy('BCLR', IDY, 0x1D, 4)
 
 # ── JSR ──
 _op('JSR', DIR, 0x9D, 2)
@@ -487,8 +493,8 @@ BRANCH_MNEMONICS = {
 }
 
 # ── Bit manipulation instructions with special multi-operand syntax ──
-# BSET/BCLR: addr,mask        → opcode, addr, mask (3 bytes DIR / 3 bytes IDX)
-# BRSET/BRCLR: addr,mask,target → opcode, addr, mask, rel (4 bytes DIR / 4 bytes IDX)
+# BSET/BCLR: addr,mask → opcode, addr, mask (3 bytes DIR/IDX; 4 bytes IDY)
+# BRSET/BRCLR: addr,mask,target → opcode, addr, mask, rel (4 bytes DIR/IDX; 5 bytes IDY)
 BIT_SET_CLR_MNEMONICS = {'BSET', 'BCLR'}              # addr,mask
 BIT_BRANCH_MNEMONICS = {'BRSET', 'BRCLR'}             # addr,mask,target
 BIT_ALL_MNEMONICS = BIT_SET_CLR_MNEMONICS | BIT_BRANCH_MNEMONICS
@@ -507,6 +513,7 @@ class AsmLine:
     comment: Optional[str] = None
     line_num: int = 0
     raw: str = ""
+    instruction_size: Optional[int] = None  # Reserved in pass 1; must not shrink in pass 2
 
 
 def _parse_line(line: str, line_num: int) -> AsmLine:
@@ -637,7 +644,8 @@ def _classify_operand(mnemonic: str, operand: Optional[str], symbols: Dict[str, 
                 offset_val = _parse_value(parts[0], symbols, line_num) & 0xFF
                 mask_str = parts[2].lstrip('#').lstrip('$')
                 mask = _parse_value(parts[2].lstrip('#'), symbols, line_num) & 0xFF
-                return (IDX, offset_val, mask)
+                mode = IDY if parts[1].upper() == 'Y' else IDX
+                return (mode, offset_val, mask)
             else:
                 # BSET/BCLR addr,#mask (2 parts, direct)
                 if len(parts) != 2:
@@ -658,7 +666,8 @@ def _classify_operand(mnemonic: str, operand: Optional[str], symbols: Dict[str, 
                 offset_val = _parse_value(parts[0], symbols, line_num) & 0xFF
                 mask = _parse_value(parts[2].lstrip('#'), symbols, line_num) & 0xFF
                 target = _parse_value(parts[3], symbols, line_num)
-                return (IDX, offset_val, mask, target)
+                mode = IDY if parts[1].upper() == 'Y' else IDX
+                return (mode, offset_val, mask, target)
             else:
                 # BRSET/BRCLR addr,#mask,target (3 parts, direct)
                 if len(parts) != 3:
@@ -734,6 +743,7 @@ class Assembler:
         self.errors: List[str] = []           # Accumulated error messages
         self._lines: List[AsmLine] = []       # Parsed assembly lines
         self._segments: List[Tuple[int, bytearray]] = []  # (addr, data) pairs for multi-ORG support
+        self._occupied = bytearray(0x10000)
 
     def assemble(self, source: str) -> bytearray:
         """Assemble source text into binary.
@@ -749,6 +759,7 @@ class Assembler:
         self.errors = []
         self._lines = []
         self._segments = []
+        self._occupied = bytearray(0x10000)
 
         # Parse all lines
         raw_lines = source.split('\n')
@@ -797,6 +808,8 @@ class Assembler:
         # ── Directives ──
         if mnem == 'ORG':
             self.pc = _parse_value(line.operand, self.symbols, line.line_num)
+            if not 0 <= self.pc <= 0xFFFF:
+                raise AssemblerError("ORG is outside the 16-bit address space", line.line_num)
             return
 
         if mnem == 'EQU':
@@ -842,6 +855,7 @@ class Assembler:
 
         # Estimate instruction size
         size = self._estimate_size(mnem, line.operand, line.line_num)
+        line.instruction_size = size
         self.pc += size
 
     def _estimate_size(self, mnem: str, operand: Optional[str], line_num: int) -> int:
@@ -862,13 +876,15 @@ class Assembler:
             parts = [p.strip() for p in operand.split(',')]
             is_idx = len(parts) >= 2 and parts[1].upper() in ('X', 'Y')
             if is_idx:
-                return OPCODES[mnem][IDX][1]  # 3 bytes for indexed BSET/BCLR
+                mode = IDY if parts[1].upper() == 'Y' else IDX
+                return OPCODES[mnem][mode][1]
             return OPCODES[mnem][DIR][1]  # 3 bytes for direct BSET/BCLR
         if mnem in BIT_BRANCH_MNEMONICS:
             parts = [p.strip() for p in operand.split(',')]
             is_idx = len(parts) >= 2 and parts[1].upper() in ('X', 'Y')
             if is_idx:
-                return OPCODES[mnem][IDX][1]  # 4 bytes for indexed BRSET/BRCLR
+                mode = IDY if parts[1].upper() == 'Y' else IDX
+                return OPCODES[mnem][mode][1]
             return OPCODES[mnem][DIR][1]  # 4 bytes for direct BRSET/BRCLR
 
         # Immediate
@@ -953,6 +969,8 @@ class Assembler:
         # ── Directives ──
         if mnem == 'ORG':
             self.pc = _parse_value(line.operand, self.symbols, line.line_num)
+            if not 0 <= self.pc <= 0xFFFF:
+                raise AssemblerError("ORG is outside the 16-bit address space", line.line_num)
             return
 
         if mnem == 'EQU':
@@ -1002,13 +1020,28 @@ class Assembler:
         classified = _classify_operand(mnem, line.operand, self.symbols, line.line_num)
         mode = classified[0]
 
+        # An unresolved address reserves EXT in pass 1. Even if its final value
+        # fits the direct page, shrinking it now would invalidate every later
+        # label and relative branch. Keep the reserved encoding, without an
+        # unimplemented relaxation pass. Reject other layout changes explicitly.
+        if (mode == DIR and EXT in OPCODES[mnem]
+                and OPCODES[mnem][EXT][1] == line.instruction_size):
+            mode = EXT
+            classified = (mode, *classified[1:])
+        if mode in OPCODES[mnem] and OPCODES[mnem][mode][1] != line.instruction_size:
+            raise AssemblerError(
+                f"{mnem}: instruction size changed between passes "
+                f"({line.instruction_size} to {OPCODES[mnem][mode][1]} bytes)",
+                line.line_num,
+            )
+
         # ── Special handling for bit manipulation instructions ──
         if mnem in BIT_SET_CLR_MNEMONICS:
             # BSET/BCLR direct: classified = (DIR, addr, mask)
-            # BSET/BCLR indexed: classified = (IDX, offset, mask)
-            if mode == IDX:
+            # BSET/BCLR indexed: classified = (IDX/IDY, offset, mask)
+            if mode in (IDX, IDY):
                 _, offset_val, mask = classified
-                opcode_bytes, total_size = OPCODES[mnem][IDX]
+                opcode_bytes, total_size = OPCODES[mnem][mode]
                 data = bytearray(opcode_bytes)
                 data.append(offset_val & 0xFF)
                 data.append(mask & 0xFF)
@@ -1025,10 +1058,10 @@ class Assembler:
 
         if mnem in BIT_BRANCH_MNEMONICS:
             # BRSET/BRCLR direct: classified = (DIR, addr, mask, target)
-            # BRSET/BRCLR indexed: classified = (IDX, offset, mask, target)
-            if mode == IDX:
+            # BRSET/BRCLR indexed: classified = (IDX/IDY, offset, mask, target)
+            if mode in (IDX, IDY):
                 _, offset_val, mask, target = classified
-                opcode_bytes, total_size = OPCODES[mnem][IDX]
+                opcode_bytes, total_size = OPCODES[mnem][mode]
                 data = bytearray(opcode_bytes)
                 data.append(offset_val & 0xFF)
                 data.append(mask & 0xFF)
@@ -1107,6 +1140,12 @@ class Assembler:
 
     def _emit(self, data: bytearray):
         """Emit bytes at current PC and advance."""
+        end = self.pc + len(data)
+        if not 0 <= self.pc <= end <= 0x10000:
+            raise AssemblerError("Emitted bytes exceed the 16-bit address space")
+        if any(self._occupied[self.pc:end]):
+            raise AssemblerError("Overlapping output segments")
+        self._occupied[self.pc:end] = bytes([1]) * len(data)
         self._segments.append((self.pc, data))
         self.pc += len(data)
 

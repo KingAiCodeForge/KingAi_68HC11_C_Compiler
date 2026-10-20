@@ -39,6 +39,7 @@ class TokenType(enum.Enum):
     KW_VOLATILE = "volatile"
     KW_CONST = "const"
     KW_STATIC = "static"
+    KW_EXTERN = "extern"
     KW_IF = "if"
     KW_ELSE = "else"
     KW_WHILE = "while"
@@ -141,6 +142,7 @@ KEYWORDS: Dict[str, TokenType] = {
     "volatile": TokenType.KW_VOLATILE,
     "const": TokenType.KW_CONST,
     "static": TokenType.KW_STATIC,
+    "extern": TokenType.KW_EXTERN,
     "if": TokenType.KW_IF,
     "else": TokenType.KW_ELSE,
     "while": TokenType.KW_WHILE,
@@ -222,14 +224,14 @@ SINGLE_CHAR_OPS: Dict[str, TokenType] = {
 # ──────────────────────────────────────────────
 
 class Preprocessor:
-    """Resolve #define macros and strip #include / #pragma lines.
+    """Resolve object-like #define macros; reject unsupported directives.
 
     This is a minimal C preprocessor that handles:
       - #define NAME VALUE  (simple text substitution, no function macros)
       - #define NAME         (flag defines, set to "1")
-      - #include              (stripped — headers handled externally)
-      - #ifdef / #ifndef / #endif / #else / #if / #elif / #undef  (stripped)
-      - #pragma               (passed through for codegen inspection)
+      - #undef NAME
+    Includes, conditional directives and pragmas require an external C
+    preprocessor. Silently removing them would compile a different program.
     """
 
     def __init__(self, source: str):
@@ -286,7 +288,7 @@ class Preprocessor:
         # Strip all comments first (standard C preprocessing order)
         source = self._strip_comments(self.source)
         out_lines: List[str] = []
-        for line in source.splitlines():
+        for line_number, line in enumerate(source.splitlines(), 1):
             stripped = line.strip()
 
             # #define NAME value
@@ -309,24 +311,26 @@ class Preprocessor:
                 out_lines.append("")
                 continue
 
-            # #include — skip (headers handled externally)
-            if re.match(r'#\s*include\b', stripped):
+            undef = re.fullmatch(r'#\s*undef\s+(\w+)\s*', stripped)
+            if undef:
+                self.defines.pop(undef.group(1), None)
                 out_lines.append("")
                 continue
 
-            # #ifndef / #ifdef / #endif — skip (basic guard stripping)
-            if re.match(r'#\s*(ifndef|ifdef|endif|else|if|elif|undef)\b', stripped):
-                out_lines.append("")
-                continue
-
-            # #pragma — emit as-is for codegen to inspect later
-            if stripped.startswith("#pragma"):
-                out_lines.append(line)
-                continue
+            if stripped.startswith("#"):
+                raise LexerError("Unsupported preprocessor directive; preprocess includes/conditionals externally", line_number, 1)
 
             # Substitute defines in the line (whole-word replacement)
-            for name, value in self.defines.items():
-                line = re.sub(rf'\b{re.escape(name)}\b', value, line)
+            # Match quoted literals before identifiers so macros cannot change
+            # inline assembly strings or character literals.
+            pattern = r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|\b[A-Za-z_]\w*\b'
+            for _ in range(32):
+                expanded = re.sub(pattern, lambda match: self.defines.get(match.group(0), match.group(0)), line)
+                if expanded == line:
+                    break
+                line = expanded
+            else:
+                raise LexerError("Macro expansion exceeds 32 passes", line_number, 1)
 
             out_lines.append(line)
 

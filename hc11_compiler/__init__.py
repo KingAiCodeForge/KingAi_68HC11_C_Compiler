@@ -4,7 +4,9 @@ KingAI 68HC11 C Compiler for Delco PCMs
 A subset-C compiler targeting the Motorola 68HC11 microcontroller,
 designed for Delco automotive Powertrain Control Modules (PCMs).
 
-Supports: VY V6 (09356445), 1227165, 1227730, 16197427 and compatible PCMs.
+Profiles: generic, VY V6 $060A-family memory layout, 1227730 and 16197427.
+A profile selects a compiler memory model. It does not identify or qualify an
+engine, ECU service number, OS, calibration, image hash, bank state or patch site.
 
 Architecture (for contributors / porters to other languages):
     ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌───────────┐    ┌───────────┐
@@ -19,9 +21,12 @@ Architecture (for contributors / porters to other languages):
     - codegen.py:   Tree-walk emitter → retarget by changing mnemonics + registers
     - optimizer.py: Peephole on text lines → same pattern works on any asm output
     - assembler.py: Two-pass label resolver → port opcode table for your CPU
+    - objectfile.py: K11O relocatable translation-unit container
+    - resource_map.py: collision-checked ROM/RAM/ZP allocation
+    - linker.py: multi-object symbol/resource linker
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0a1"
 __author__ = "KingAI"
 
 from .lexer import Lexer, Token, TokenType
@@ -29,6 +34,13 @@ from .ast_nodes import *
 from .parser import Parser
 from .codegen import CodeGenerator
 from .assembler import Assembler, AssemblerError, assemble, assemble_to_s19
+from .objectfile import (
+    KCOS_ABI, OBJECT_MAGIC, OBJECT_VERSION, ObjectFormatError,
+    ObjectSymbol, RelocatableObject, compile_asm_object, compile_kcos_module, compile_object,
+)
+from .resource_map import (
+    Allocation, MemoryRegion, ResourceCollisionError, ResourceMap, ResourceMapError,
+)
 
 def compile_source(source: str, *, org: int = 0x8000, stack: int = 0x00FF,
                    target: str = "generic", output: str = "asm") -> str:
@@ -47,6 +59,10 @@ def compile_source(source: str, *, org: int = 0x8000, stack: int = 0x00FF,
         Assembly text (str), S19 text (str), listing text (str),
         or raw bytes (bytes) depending on output.
     """
+    if not isinstance(source, str):
+        raise TypeError("source must be a string")
+    if output not in {"asm", "s19", "binary", "listing"}:
+        raise ValueError(f"Unsupported output format: {output!r}")
     lexer = Lexer(source)
     tokens = lexer.tokenize()
     parser = Parser(tokens, source)
@@ -67,7 +83,17 @@ def compile_source(source: str, *, org: int = 0x8000, stack: int = 0x00FF,
         return bytes(assembler.binary)
     elif output == 'listing':
         return assembler.get_listing()
-    elif output == 'listing':
-        return assembler.get_listing()
     else:
         return asm_text
+
+
+def link_objects(objects, *, resource_map=None):
+    """Lazy public wrapper to avoid an import cycle at package import time."""
+    from .linker import link_objects as _link_objects
+    return _link_objects(objects, resource_map=resource_map)
+
+
+def link_sources(sources, *, target="generic", resource_map=None):
+    """Compile named translation units and link them into one image."""
+    from .linker import link_sources as _link_sources
+    return _link_sources(sources, target=target, resource_map=resource_map)
