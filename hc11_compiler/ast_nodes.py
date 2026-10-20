@@ -23,11 +23,15 @@ class CType:
     is_volatile: bool = False
     is_const: bool = False
     is_static: bool = False
+    is_extern: bool = False
     pointer_depth: int = 0      # 0 = not a pointer, 1 = *, 2 = **, etc.
+    array_len: Optional[int] = None
+    struct_name: Optional[str] = None
+    struct_size: int = 0
 
     @property
-    def size(self) -> int:
-        """Size in bytes on the 68HC11."""
+    def scalar_size(self) -> int:
+        """Size of one scalar/aggregate element, ignoring an array declarator."""
         if self.pointer_depth > 0:
             return 2  # All pointers are 16-bit
         if self.base == "void":
@@ -36,7 +40,38 @@ class CType:
             return 1
         if self.base == "int":
             return 2
-        return 2  # default
+        if self.base == "struct":
+            return self.struct_size
+        return 2  # conservative default
+
+    @property
+    def size(self) -> int:
+        """Storage size in bytes on the 68HC11."""
+        if self.array_len is not None and self.pointer_depth == 0:
+            return self.scalar_size * self.array_len
+        return self.scalar_size
+
+    @property
+    def is_array(self) -> bool:
+        return self.array_len is not None and self.pointer_depth == 0
+
+    def element_type(self) -> "CType":
+        """Return the element type for an array, or pointed-to type for a pointer."""
+        if self.is_array:
+            return CType(
+                base=self.base,
+                is_unsigned=self.is_unsigned,
+                is_volatile=self.is_volatile,
+                is_const=self.is_const,
+                is_static=self.is_static,
+                is_extern=self.is_extern,
+                pointer_depth=self.pointer_depth,
+                struct_name=self.struct_name,
+                struct_size=self.struct_size,
+            )
+        if self.pointer_depth > 0:
+            return self.pointed_to()
+        return self
 
     @property
     def is_pointer(self) -> bool:
@@ -58,7 +93,11 @@ class CType:
             is_unsigned=self.is_unsigned,
             is_volatile=self.is_volatile,
             is_const=self.is_const,
+            is_static=self.is_static,
+            is_extern=self.is_extern,
             pointer_depth=self.pointer_depth - 1,
+            struct_name=self.struct_name,
+            struct_size=self.struct_size,
         )
 
     def pointer_to(self) -> CType:
@@ -68,7 +107,11 @@ class CType:
             is_unsigned=self.is_unsigned,
             is_volatile=self.is_volatile,
             is_const=self.is_const,
+            is_static=self.is_static,
+            is_extern=self.is_extern,
             pointer_depth=self.pointer_depth + 1,
+            struct_name=self.struct_name,
+            struct_size=self.struct_size,
         )
 
     def __str__(self) -> str:
@@ -77,11 +120,19 @@ class CType:
             parts.append("const")
         if self.is_volatile:
             parts.append("volatile")
+        if self.is_extern:
+            parts.append("extern")
         if self.is_unsigned:
             parts.append("unsigned")
-        parts.append(self.base)
+        if self.base == "struct" and self.struct_name:
+            parts.extend(["struct", self.struct_name])
+        else:
+            parts.append(self.base)
         parts.append("*" * self.pointer_depth)
-        return " ".join(p for p in parts if p)
+        rendered = " ".join(p for p in parts if p)
+        if self.array_len is not None:
+            rendered += f"[{self.array_len}]"
+        return rendered
 
 
 # ──────────────────────────────────────────────
@@ -139,6 +190,22 @@ class TypedefDecl(ASTNode):
     """Typedef declaration."""
     name: str = ""
     ctype: CType = field(default_factory=lambda: CType("int"))
+
+
+@dataclass
+class StructField(ASTNode):
+    """One field in a named struct, with byte offset fixed by the parser."""
+    name: str = ""
+    ctype: CType = field(default_factory=lambda: CType("int"))
+    offset: int = 0
+
+
+@dataclass
+class StructDecl(ASTNode):
+    """Named struct definition."""
+    name: str = ""
+    fields: List[StructField] = field(default_factory=list)
+    size: int = 0
 
 
 # ──────────────────────────────────────────────

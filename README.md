@@ -1,4 +1,4 @@
-# KingAI 68HC11 C Compiler — v0.3.0-alpha
+# KingAI 68HC11 C Compiler — v0.4.0-alpha
 
 Built from the ground up alongside working Python 68HC11 disassembly and patching scripts. This is for anyone who wants to go beyond hex-editing and write real C code for these ECU platforms.
 
@@ -16,11 +16,17 @@ The compiler handles a practical subset of C and generates real 68HC11 instructi
 - **Comparisons**: `== != < > <= >=` — sets condition codes, branches with BEQ/BNE/BLT/BGE etc.
 - **Control flow**: `if/else`, `while`, `do-while`, `for`, `break`, `continue`, `return`
 - **Pointers**: dereference (`*ptr`), address-of (`&var`), volatile I/O (`*(volatile unsigned char *)0x1030`)
+- **Arrays**: fixed one-dimensional arrays (1–255 elements), array-to-pointer decay, scaled indexed scalar loads/stores, `sizeof(array)`
+- **Structs**: named packed structs, fixed field offsets, struct pointers, `.` / `->` scalar member loads/stores, `sizeof(struct T)`
 - **Inline assembly**: `asm("LDAA $1030");` — drops raw HC11 instructions into the output
 - **ISR support**: `__attribute__((interrupt))` generates proper RTI epilogue
 - **Zero-page placement**: `__zeropage` qualifier allocates variables in direct-page RAM ($00–$FF)
 - **Peephole optimizer**: 13 rules that clean up redundant instructions (TSX dedup, push/pop elimination, while(1) optimization, dead TSTA removal)
 - **Target profiles**: memory maps for `generic`, `vy_v6` (09356445), `1227730`, `16197427`
+- **Stable register ABI**: Y is a callee-preserved frame pointer; X is free/caller-clobbered for pointer and indexed addressing
+- **Relocatable KCOS objects**: `.k11o` translation units with ABI/target/source hash, imports/exports, and RAM/ZP resource requests
+- **Multi-file linker**: resolves cross-module symbols, namespaces static symbols, places code, and reassembles one linked image
+- **Collision-checked resource maps**: explicit ROM/RAM/ZP regions and reservations with hard overlap/exhaustion errors
 - **Built-in assembler**: 146 mnemonics, 261 opcode entries, two-pass label resolution, Motorola S19 + raw binary + listing output — no external assembler needed
 - **Unified toolkit** (`hc11kit`): 9-command CLI — assemble, disassemble, compile, patch ROMs, find free space, verify/fix checksums, convert addresses, parse XDFs, identify binaries
 
@@ -28,13 +34,14 @@ The compiler handles a practical subset of C and generates real 68HC11 instructi
 
 | Area | Status |
 |------|--------|
-| **Output format** | Assembly text, raw binary, or Motorola S19 — built-in assembler, no external tools needed |
+| **Output format** | Assembly, raw binary, S19, listing, plus relocatable `.k11o` objects |
 | **ROM patching** | `hc11kit patch` injects code + installs JSR hook + verifies in one command |
-| **Structs / arrays** | Parsed by the front-end but not handled in codegen yet |
-| **Multi-file** | Single translation unit only, no `#include` resolution beyond `#define` |
+| **Structs / arrays** | Scalar aggregate access implemented; fixed 1-D arrays and named packed structs. Aggregate copy/initializers and multidimensional arrays remain out of subset |
+| **Multi-file** | `hc11kcos.py` compiles/links multiple translation units through K11O objects; textual `#include` preprocessing is still not a C-preprocessor implementation |
+| **Resource placement** | ROM/RAM/ZP regions and reserved holes are allocated and collision-checked at link time |
 | **Standard library** | None — no libc, no printf, no malloc. Bare-metal embedded. |
 | **Floating point** | Not supported — HC11 has no FPU, integer arithmetic only |
-| **Stack frames** | Simple tracking — works for typical ECU routines (few locals, shallow nesting). Deep or complex scoping may produce wrong offsets |
+| **Stack frames** | Entire local frame reserved once; Y stays stable as frame pointer while X is available for pointers/indexing |
 | **Hardware validation** | Assembly verified against HC11 reference manual + instruction encodings validated byte-by-byte. **Not yet tested on physical hardware** |
 
 This tool is for generating assembly for direct, simple, single-file embedded routines — not for compiling general-purpose C programs.
@@ -52,6 +59,16 @@ python hc11cc.py examples/blink.c --target vy_v6
 
 # Compile C directly to binary
 python hc11kit.py compile examples/rpm_limiter.c -o rpm_limiter.bin --target vy_v6
+
+# Compile a KCOS translation unit to a relocatable object
+python hc11kcos.py compile module_a.c --target vy_v6 -o module_a.k11o
+
+# Compile + link several translation units with collision-checked placement
+python hc11kcos.py build module_a.c module_b.c --target vy_v6 \
+  --resource-map vy_kcos_map.json --map-out linked.map.json -o kcos.s19
+
+# Emit a starting resource map for editing/reservations
+python hc11kcos.py map --target vy_v6 -o vy_kcos_map.json
 
 # Assemble a hand-written .asm file
 python hc11kit.py asm spark_cut.asm -o spark_cut.bin
@@ -97,25 +114,21 @@ Output (abbreviated):
 
         ; Function: main
 main:
-        PSHX
-        TSX
+        PSHY
         DES
-        ; local: unsigned char x
+        TSY
+        ; local Y+0: unsigned char x
         LDAA    #$00
-        TSX
-        STAA    0,X  ; x
+        STAA    0,Y  ; x
 .while1:
-        TSX
-        LDAA    0,X  ; x
+        LDAA    0,Y  ; x
         PSHA
         LDAA    #$01
         TAB
         PULA
         ABA
-        TSX
-        STAA    0,X  ; x
-        TSX
-        LDAA    0,X  ; x
+        STAA    0,Y  ; x
+        LDAA    0,Y  ; x
         STAA    $1000  ; *($1000) = A direct
         BRA     .while1
 ```
@@ -138,19 +151,24 @@ hc11_compiler/
   parser.py            — Recursive-descent parser (656 lines)
   codegen.py           — HC11 code generator (1325 lines)
   optimizer.py         — Peephole optimizer (170 lines)
-  assembler.py         — Two-pass assembler, 146 mnemonics (1037 lines)
-hc11cc.py              — Standalone compiler CLI (184 lines)
-hc11kit.py             — Unified 9-command toolkit CLI (1024 lines)
+  assembler.py         — Two-pass assembler and S19/listing output
+  objectfile.py         — K11O relocatable object format
+  resource_map.py       — collision-checked ROM/RAM/ZP placement
+  linker.py             — multi-object KCOS linker
+hc11cc.py              — Standalone single-translation-unit compiler CLI
+hc11kcos.py            — KCOS object/build/link/resource-map CLI
+hc11kit.py             — Unified toolkit CLI
 examples/
   delco_hc11.h         — HC11F1 register definitions + VY V6 RAM addresses
   blink.c, adc_read.c, isr_example.c, rpm_limiter.c,
   sci_serial.c, timer_delay.c, test_rpm.c
 tests/                   (gitignored — internal only)
   test_compiler.py     — 40 compiler tests (pytest)
-  test_asm_smoke.py    — 34 assembler tests (pytest)
+  test_asm_smoke.py    — assembler tests (pytest)
+  test_kcos_linker.py   — aggregate/object/linker/resource-map tests
 ```
 
-Total: ~5,200 lines of compiler + toolkit code. 74/74 tests passing.
+The branch adds software-only regression coverage for aggregate codegen and KCOS linking. See `docs/KCOS_RELOCATABLE_LINKER.md` for the ABI, resource-map format, and current subset limits.
 
 ## Running Tests
 
