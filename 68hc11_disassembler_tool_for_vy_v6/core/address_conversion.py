@@ -274,7 +274,7 @@ class AddressConverter:
         
         return cpu_address
     
-    def xdf_to_file(self, xdf_address: int, xdf_base_offset: int = 0, xdf_subtract: int = 0) -> int:
+    def xdf_to_file(self, xdf_address: int, xdf_base_offset: Optional[int] = None, xdf_subtract: Optional[int] = None) -> int:
         """
         Convert XDF address to file offset using BASEOFFSET rules.
         
@@ -290,9 +290,14 @@ class AddressConverter:
         Returns:
             int: Actual file offset to read
         """
-        # Use provided base offset or instance default
-        base_offset = xdf_base_offset if xdf_base_offset != 0 else self.base_offset
-        subtract = xdf_subtract if xdf_base_offset != 0 else self.base_subtract
+        # None means use the instance's configured XDF header. Explicit zero is
+        # meaningful and must override a nonzero instance default.
+        base_offset = self.base_offset if xdf_base_offset is None else xdf_base_offset
+        subtract = self.base_subtract if xdf_subtract is None else xdf_subtract
+        if not isinstance(base_offset, int) or base_offset < 0:
+            raise ValueError("XDF BASEOFFSET must be a nonnegative integer")
+        if subtract not in (0, 1):
+            raise ValueError("XDF BASEOFFSET subtract must be 0 or 1")
         
         if base_offset == 0:
             return xdf_address
@@ -304,10 +309,10 @@ class AddressConverter:
             # subtract=0: File has padding/header before calibration
             file_offset = xdf_address + base_offset
         
-        # Sanity check
+        # Negative file offsets cannot identify real bytes. Fallback to the raw
+        # address would silently decode a different part of the BIN.
         if file_offset < 0:
-            return xdf_address  # Fallback to raw address
-        
+            raise ValueError("XDF BASEOFFSET yields a negative file offset")
         return file_offset
     
     def classify_address(self, cpu_address: int) -> MemoryRegion:
