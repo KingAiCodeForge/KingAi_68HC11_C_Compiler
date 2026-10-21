@@ -19,7 +19,8 @@ class BinaryDiffSafetyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.sources = [path.read_bytes() for path in SCRIPTS]
-        assert cls.sources[0] == cls.sources[1]
+        if cls.sources[0] != cls.sources[1]:
+            raise AssertionError('Both legacy binary_differ copies must stay byte-identical')
         cls.modules = []
         for i, path in enumerate(SCRIPTS):
             spec = importlib.util.spec_from_file_location(f'binary_differ_test_{i}', path)
