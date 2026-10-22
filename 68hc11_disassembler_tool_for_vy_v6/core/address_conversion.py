@@ -274,42 +274,30 @@ class AddressConverter:
         
         return cpu_address
     
-    def xdf_to_file(self, xdf_address: int, xdf_base_offset: int = 0, xdf_subtract: int = 0) -> int:
+    def xdf_to_file(self, xdf_address: int, xdf_base_offset: Optional[int] = None,
+                    xdf_subtract: Optional[int] = None) -> int:
+        """Convert XDF address to bounded file offset using explicit BASEOFFSET.
+
+        A negative or out-of-image result must never fall back to a raw address;
+        that could silently select a different calibration cell. Passing None
+        inherits the BinaryFormat defaults. Explicit zero overrides them.
+        This is file addressing only, not banked HC11 CPU-address relocation.
         """
-        Convert XDF address to file offset using BASEOFFSET rules.
-        
-        This implements TunerPro's BASEOFFSET semantics:
-        - subtract=0: file_offset = xdf_address + offset
-        - subtract=1: file_offset = xdf_address - offset
-        
-        Args:
-            xdf_address: Address from XDF mmedaddress
-            xdf_base_offset: BASEOFFSET from XDF header (or 0)
-            xdf_subtract: subtract flag from XDF header (0 or 1)
-            
-        Returns:
-            int: Actual file offset to read
-        """
-        # Use provided base offset or instance default
-        base_offset = xdf_base_offset if xdf_base_offset != 0 else self.base_offset
-        subtract = xdf_subtract if xdf_base_offset != 0 else self.base_subtract
-        
-        if base_offset == 0:
-            return xdf_address
-        
-        if subtract == 1:
-            # subtract=1: ECU addresses start at offset, file starts at 0
-            file_offset = xdf_address - base_offset
-        else:
-            # subtract=0: File has padding/header before calibration
-            file_offset = xdf_address + base_offset
-        
-        # Sanity check
-        if file_offset < 0:
-            return xdf_address  # Fallback to raw address
-        
+        base_offset = self.base_offset if xdf_base_offset is None else xdf_base_offset
+        subtract = self.base_subtract if xdf_subtract is None else xdf_subtract
+        if (type(xdf_address) is not int or type(base_offset) is not int or
+                type(subtract) is not int):
+            raise ValueError("XDF address, BASEOFFSET and subtract must be integers")
+        if xdf_address < 0 or base_offset < 0 or subtract not in (0, 1):
+            raise ValueError("Invalid XDF address/BASEOFFSET/subtract")
+        file_offset = xdf_address - base_offset if subtract else xdf_address + base_offset
+        if not 0 <= file_offset < self.format.total_size:
+            raise ValueError(
+                f"XDF 0x{xdf_address:X} with BASEOFFSET 0x{base_offset:X} "
+                f"subtract={subtract} resolves outside 0x{self.format.total_size:X} bytes"
+            )
         return file_offset
-    
+
     def classify_address(self, cpu_address: int) -> MemoryRegion:
         """
         Classify a CPU address by memory region type.

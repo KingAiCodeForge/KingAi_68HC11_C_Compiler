@@ -15,6 +15,12 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 import json
 
+try:
+    from .safe_cli_output import render_output, publish_output
+except ImportError:
+    # Legacy scripts also import cli_base directly from their core/ directory.
+    from safe_cli_output import render_output, publish_output
+
 
 class CLIBase:
     """Base class for all command-line tools"""
@@ -77,7 +83,10 @@ class CLIBase:
     def setup_logging(self):
         """Configure logging based on arguments"""
         if self.args.no_log:
-            logging.disable(logging.CRITICAL)
+            # Do not globally disable every other library's logging.
+            self.logger = logging.Logger(self.TOOL_NAME + ".no_log")
+            self.logger.addHandler(logging.NullHandler())
+            self.logger.propagate = False
             return
         
         # Determine log level
@@ -103,7 +112,7 @@ class CLIBase:
             handlers.append(console)
         
         # File handler
-        if self.args.log_file:
+        if self.args.log_file and not self.args.dry_run:
             log_path = Path(self.args.log_file)
             log_path.parent.mkdir(parents=True, exist_ok=True)
             file_handler = logging.FileHandler(log_path, encoding='utf-8')
@@ -139,46 +148,32 @@ class CLIBase:
         # Determine directory
         if self.args.output_dir:
             output_dir = Path(self.args.output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
             return output_dir / filename
         
         return Path(filename)
     
     def write_output(self, data: Any, output_path: Optional[Path] = None):
-        """Write output in requested format"""
+        """Publish one complete report without truncating existing files."""
         if output_path is None:
             output_path = self.get_output_path('output', self.args.format)
-        
+
         if self.args.dry_run:
             self.logger.info(f"[DRY RUN] Would write to: {output_path}")
             return
-        
-        if output_path.exists() and not self.args.force:
+
+        # Rendering may fail (e.g. invalid JSON NaN or inconsistent CSV rows);
+        # do that before creating any output paths.
+        rendered = render_output(data, self.args.format)
+        try:
+            publish_output(
+                Path(output_path), rendered, overwrite=bool(self.args.force),
+                source=self.args.input,
+            )
+        except FileExistsError:
             self.logger.error(f"Output file exists: {output_path} (use --force)")
             sys.exit(1)
-        
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        if self.args.format == 'json':
-            with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        elif self.args.format == 'csv':
-            import csv
-            with open(output_path, 'w', encoding='utf-8', newline='') as f:
-                if isinstance(data, dict):
-                    writer = csv.DictWriter(f, fieldnames=data.keys())
-                    writer.writeheader()
-                    writer.writerow(data)
-                elif isinstance(data, list) and len(data) > 0:
-                    writer = csv.DictWriter(f, fieldnames=data[0].keys())
-                    writer.writeheader()
-                    writer.writerows(data)
-        else:  # txt or md
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(str(data))
-        
-        self.logger.info(f"✅ Output written to: {output_path}")
-    
+        self.logger.info(f"Output written to: {output_path}")
+
     def run(self):
         """Main entry point - override in subclass"""
         raise NotImplementedError("Subclass must implement run()")
@@ -214,7 +209,11 @@ class CLIBase:
             self.logger.warning("\n⚠️  Interrupted by user")
             sys.exit(130)
         except Exception as e:
-            self.logger.error(f"❌ Error: {e}", exc_info=self.args.verbose > 1)
+            if self.args.no_log:
+                # Disabling routine logging should not suppress fatal diagnostics.
+                print(f"ERROR: {e}", file=sys.stderr)
+            else:
+                self.logger.error(f"❌ Error: {e}", exc_info=self.args.verbose > 1)
             sys.exit(1)
 
 
